@@ -221,6 +221,22 @@ end.take(3)
   # => 0.0009s
 ```
 
+Cartesian products are also generated lazily and fairly. Combinations are
+ordered first by the sum of their source indices, then lexicographically
+within that sum. Thus every finite index combination is eventually reached,
+even when one or more input lists are infinite:
+
+``` ruby
+numbers = Hamster.iterate(0, &:next)
+numbers.product(numbers).take(6)
+# => Hamster::List[
+#      [0, 0], [0, 1], [1, 0],
+#      [0, 2], [1, 1], [2, 0]]
+```
+
+A product ends when all inputs are finite or immediately ends when any input
+is empty; it continues indefinitely when at least one input is infinite.
+
 Compare that to the conventional equivalent which needs to
 calculate all possible values in the range before taking the
 first three:

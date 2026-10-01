@@ -383,6 +383,60 @@ module Hamster
     alias :concat :append
     alias :+ :append
 
+    # Cartesian product or multiplication.
+    #
+    # @overload product(*lists)
+    #   Return a lazy `List` of all combinations of elements from this `List`
+    #   and each of the given lists. Combinations are grouped by the sum of
+    #   their source indices. Groups are emitted from the smallest sum to the
+    #   largest, and combinations with the same index sum are in lexicographic
+    #   order. This keeps enumeration fair when one or more input lists are
+    #   infinite.
+    #
+    #   @example
+    #     numbers = Hamster.iterate(0, &:next)
+    #     numbers.product(numbers).take(6)
+    #     # => Hamster::List[
+    #     #      [0, 0], [0, 1], [1, 0],
+    #     #      [0, 2], [1, 1], [2, 0]]
+    #
+    #   For example, a finite 2-by-3 list follows this order:
+    #
+    #   ```
+    #   sum 0: [0, 0]
+    #   sum 1: [0, 1], [1, 0]
+    #   sum 2: [0, 2], [1, 1]
+    #   sum 3: [1, 2]
+    #   ```
+    #
+    #   @param lists [List] The lists to combine with this one
+    #   @return [List] A lazy list of arrays
+    #   @raise [TypeError] If an argument is not a `List`
+    #   @yield [combination] Once for each combination when a block is given
+    #   @yieldparam [Array] combination One Cartesian-product combination
+    #   @return [self] The receiver when a block is given
+    # @overload product
+    #   Return the result of multiplying all the items in this `List` together.
+    #
+    #   @example
+    #     Hamster::List[1, 2, 3, 4, 5].product # => 120
+    #
+    #   @return [Numeric]
+    def product(*lists)
+      return super if lists.empty?
+
+      lists.unshift(self)
+      unless lists.all? { |list| list.is_a?(List) }
+        raise TypeError, "expected Hamster::List"
+      end
+
+      result = fair_product(lists)
+      return result unless block_given?
+
+      result.each { |item| yield(item) }
+      self
+    end
+
     # Return a `List` with the same items, but in reverse order.
     #
     # @example
@@ -1259,6 +1313,67 @@ module Hamster
         super
       end
     end
+
+    def fair_product(lists)
+      Hamster.enumerate(Enumerator.new do |yielder|
+        next if lists.any?(&:empty?)
+
+        dimensions = lists.size
+        if dimensions == 1
+          lists.first.each { |item| yielder.yield([item]) }
+          next
+        end
+
+        indexes = Array.new(dimensions, 0)
+        prefixes = Array.new(dimensions) { [] }
+        tails = lists.dup
+        sum = 0
+
+        loop do
+          emitted = false
+
+          loop do
+            valid = true
+            dimensions.times do |dimension|
+              while prefixes[dimension].size <= indexes[dimension] && !tails[dimension].empty?
+                prefixes[dimension] << tails[dimension].head
+                tails[dimension] = tails[dimension].tail
+              end
+              if prefixes[dimension].size <= indexes[dimension]
+                valid = false
+                break
+              end
+            end
+
+            if valid
+              emitted = true
+              yielder.yield(indexes.each_with_index.map { |index, dimension|
+                prefixes[dimension][index]
+              })
+            end
+
+            incrementable = dimensions - 2
+            suffix_sum = indexes[dimensions - 1]
+            while incrementable >= 0 && suffix_sum == 0
+              suffix_sum += indexes[incrementable]
+              incrementable -= 1
+            end
+            break if incrementable < 0
+
+            indexes[incrementable] += 1
+            (incrementable + 1).upto(dimensions - 2) { |dimension| indexes[dimension] = 0 }
+            indexes[dimensions - 1] = sum
+            (0...dimensions - 1).each { |dimension| indexes[dimensions - 1] -= indexes[dimension] }
+          end
+
+          break unless emitted
+          sum += 1
+          indexes = Array.new(dimensions - 1, 0)
+          indexes << sum
+        end
+      end)
+    end
+
   end
 
   # The basic building block for constructing lists
