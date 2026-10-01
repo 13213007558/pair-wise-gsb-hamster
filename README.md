@@ -276,6 +276,26 @@ Besides `Hamster::List[]` there are other ways to construct lists:
   - `Hamster::List.empty` returns an empty list, which you can
     build up using repeated calls to `#add` or other `List` methods.
 
+### Cartesian Products
+
+`List#product` returns a lazy Cartesian product. Tuples are grouped by the
+sum of their zero-based indices, and tuples with the same index sum are
+emitted lexicographically. This keeps every dimension moving even when the
+input lists are infinite:
+
+``` ruby
+numbers = Hamster.iterate(0, &:next)
+letters = Hamster.List["a", "b", "c"]
+numbers.product(letters).take(6).to_a
+# => [[0, "a"], [0, "b"], [1, "a"],
+#     [0, "c"], [1, "b"], [2, "a"]]
+```
+
+Source elements are realized only as needed and are memoized, so taking a
+small prefix does not traverse an entire input or repeatedly trigger the
+source list's lazy block. Finite products end naturally; an empty input
+produces an empty product.
+
 ### Core Extensions
 
 `Enumerable#to_list` will convert any existing `Enumerable` to a list, so you can

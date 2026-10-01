@@ -15,23 +15,20 @@ describe Hamster::List do
       expect(count).to be(3)
     end
 
-    # note: Lists are not as lazy as they could be!
-    # they always realize elements a bit ahead of the current one
-
     it "returns a lazy list of items for which predicate is true" do
       count = 0
       a,b = L[1, 2, 3, 4].partition { |item| count += 1; item.odd? }
       expect(a.take(1)).to eq([1])
-      expect(count).to be(3) # would be 1 if lists were lazier
+      expect(count).to be(1)
       expect(a.take(2)).to eq([1, 3])
-      expect(count).to be(4) # would be 3 if lists were lazier
+      expect(count).to be(3)
     end
 
     it "returns a lazy list of items for which predicate is false" do
       count = 0
       a,b = L[1, 2, 3, 4].partition { |item| count += 1; item.odd? }
       expect(b.take(1)).to eq([2])
-      expect(count).to be(4) # would be 2 if lists were lazier
+      expect(count).to be(2)
       expect(b.take(2)).to eq([2, 4])
       expect(count).to be(4)
     end
@@ -61,9 +58,7 @@ describe Hamster::List do
         end
       end.each(&:join)
 
-      # if no threads "stepped on" each other, the following should be true
-      # make some allowance for "lazy" lists which actually realize a little bit ahead:
-      expect((200..203).include?(yielded.size)).to eq(true)
+      expect(yielded.size).to eq(200)
       expect(yielded).to eq((0..(yielded.size-1)).to_a)
     end
 

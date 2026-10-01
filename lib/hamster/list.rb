@@ -255,6 +255,48 @@ module Hamster
       end
     end
 
+    # Return a lazy Cartesian product of this `List` and each given `List`.
+    #
+    # Unlike ordinary nested loops, enumeration is fair even when some or all
+    # of the lists are infinite. Tuples are grouped by the sum of their
+    # zero-based indices. Within each group, tuples are emitted in
+    # lexicographic order. Therefore, for two infinite lists, the first six
+    # tuples are:
+    #
+    #   [0, 0], [0, 1], [1, 0], [0, 2], [1, 1], [2, 0]
+    #
+    # This order guarantees that every combination with finite indices is
+    # eventually reached. Source elements are only realized when a tuple that
+    # uses them is reached, and each realized source node is memoized. If all
+    # lists are finite, the returned list ends after the last combination; if
+    # any list is empty, it is empty.
+    #
+    # @overload product(*lists)
+    #   @param lists [List, Array] Other lists
+    #   @return [List] The Cartesian product as a lazy list of arrays
+    #   @example
+    #     numbers = Hamster.iterate(0, &:next)
+    #     letters = Hamster.List["a", "b", "c"]
+    #     numbers.product(letters).take(6).to_a
+    #     # => [[0, "a"], [0, "b"], [1, "a"], [0, "c"], [1, "b"], [2, "a"]]
+    #
+    # @overload product
+    #   Return the result of multiplying all items in this `List` together.
+    #   @example
+    #     Hamster::List[2, 3, 4].product # => 24
+    #
+    # @return [List, Object] A lazy Cartesian product, or the numeric product
+    def product(*lists, &block)
+      return super() if lists.empty?
+
+      product_generator = CartesianProductGenerator.new([self, *lists])
+      product_list = CartesianProduct.new(product_generator)
+      return product_list unless block_given?
+
+      product_list.each(&block)
+      self
+    end
+
     # Return a `List` which contains all the items for which the given block
     # returns true.
     #
@@ -324,9 +366,9 @@ module Hamster
     # @return [List]
     def take(number)
       LazyList.new do
+        next EmptyList if number <= 0
         next self if empty?
-        next Cons.new(head, tail.take(number - 1)) if number > 0
-        EmptyList
+        Cons.new(head, tail.take(number - 1))
       end
     end
 
@@ -1415,6 +1457,111 @@ module Hamster
 
     def realized?
       @head != Undefined
+    end
+  end
+
+  # Stateful generator used by lazy Cartesian product lists. It enumerates
+  # tuples by increasing sum of zero-based source indices.
+  # @private
+  class CartesianProductGenerator
+    def initialize(lists)
+      @lists = lists.map do |list|
+        list.is_a?(List) ? list : List.from_enum(list)
+      end
+      size = @lists.size
+      @prefixes = Array.new(size) { [] }
+      @tails = @lists.dup
+      @bounds = Array.new(size)
+      @sum = 0
+      @done = @lists.any? { |list| list.equal?(EmptyList) }
+      @enumerator = build_enumerator
+      @mutex = Mutex.new
+    end
+
+    def next_tuple
+      @mutex.synchronize do
+        return nil if @done
+        begin
+          @enumerator.next.dup
+        rescue StopIteration
+          nil
+        end
+      end
+    end
+
+    private
+
+    def build_enumerator
+      Enumerator.new do |yielder|
+        loop do
+          break if @bounds.all? && @sum > @bounds.sum - @lists.size
+          enumerate_dimension(0, @sum, [], yielder)
+          @sum += 1
+        end
+      end
+    end
+
+    def enumerate_dimension(dimension, remaining, prefix, yielder)
+      minimum = dimension == @lists.size - 1 ? remaining : 0
+      maximum = remaining
+      bound = @bounds[dimension]
+      maximum = bound - 1 if bound && maximum >= bound
+
+      minimum.upto(maximum) do |index|
+        item = element_at(dimension, index)
+        next if item.equal?(Undefined)
+
+        tuple = prefix + [item]
+        if dimension == @lists.size - 1
+          yielder << tuple
+        else
+          enumerate_dimension(dimension + 1, remaining - index, tuple, yielder)
+        end
+      end
+    end
+
+    def element_at(dimension, index)
+      bound = @bounds[dimension]
+      return Undefined if bound && index >= bound
+
+      prefix = @prefixes[dimension]
+      while prefix.size <= index
+        tail = @tails[dimension]
+        if tail.empty?
+          @bounds[dimension] = prefix.size
+          return Undefined
+        end
+        prefix << tail.head
+        @tails[dimension] = tail.tail
+      end
+
+      prefix[index]
+    end
+  end
+
+  # One immutable node of a lazy Cartesian product list.
+  # @private
+  class CartesianProduct < Realizable
+    def initialize(generator)
+      super()
+      @generator = generator
+      @mutex = Mutex.new
+    end
+
+    private
+
+    def realize
+      @mutex.synchronize do
+        return if @head != Undefined
+
+        tuple = @generator.next_tuple
+        if tuple
+          @head = tuple
+          @tail = CartesianProduct.new(@generator)
+        else
+          @head, @tail, @size = nil, self, 0
+        end
+      end
     end
   end
 

@@ -89,9 +89,8 @@ describe Hamster do
     end
 
     it "realizes values as they are needed" do
-      # this example shows that Lists are not as lazy as they could be
-      # if Lists were fully lazy, you would have to take(4) to hit the exception
-      expect { list.take(3).to_a }.to raise_exception
+      expect(list.take(3).to_a).to eq([1, 2, 3])
+      expect { list.take(4).to_a }.to raise_exception(RuntimeError, "list fully realized")
     end
   end
 
