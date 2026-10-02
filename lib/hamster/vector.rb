@@ -48,6 +48,270 @@ module Hamster
     # @private
     BITS_PER_LEVEL = 5
 
+    class StructuralNode
+      def self.raise_to(node, height)
+        while node.height < height
+          node = InternalNode.new(node.height + 1, [node])
+        end
+        node
+      end
+
+      def self.minimize(node)
+        while node.is_a?(InternalNode) && node.children.size == 1
+          node = node.children.first
+        end
+        node
+      end
+    end
+
+    class LeafNode < StructuralNode
+      attr_reader :array, :offset, :size
+
+      def initialize(array, offset = 0, size = array.size - offset)
+        @array = array
+        @offset = offset
+        @size = size
+        freeze
+      end
+
+      def height
+        0
+      end
+
+      def get(index)
+        @array[@offset + index]
+      end
+
+      def each(&block)
+        return enum_for(__method__) unless block_given?
+        @size.times { |index| yield @array[@offset + index] }
+        self
+      end
+
+      def reverse_each(&block)
+        return enum_for(__method__) unless block_given?
+        @size.times { |index| yield @array[@offset + @size - index - 1] }
+        self
+      end
+
+      def put(index, item)
+        existing = @array[@offset + index]
+        return self if existing.equal?(item)
+        values = Array.new(@size) { |i| @array[@offset + i] }
+        values[index] = item
+        LeafNode.new(values.freeze)
+      end
+
+      def slice_range(from, to)
+        return self if from == 0 && to == @size
+        LeafNode.new(@array, @offset + from, to - from)
+      end
+
+      def to_a
+        Array.new(@size) { |index| @array[@offset + index] }
+      end
+    end
+
+    class InternalNode < StructuralNode
+      attr_reader :height, :children, :sizes
+
+      def initialize(height, children)
+        @height = height
+        @children = children.freeze
+        total = 0
+        @sizes = children.map { |child| total += child.size }.freeze
+        freeze
+      end
+
+      def size
+        @sizes.last
+      end
+
+      def child_and_offset(index)
+        child_index = @sizes.bsearch_index { |size| size > index }
+        start = child_index == 0 ? 0 : @sizes[child_index - 1]
+        [@children[child_index], index - start, child_index]
+      end
+
+      def get(index)
+        child, offset = child_and_offset(index)
+        child.get(offset)
+      end
+
+      def each(&block)
+        return enum_for(__method__) unless block_given?
+        @children.each { |child| child.each(&block) }
+        self
+      end
+
+      def reverse_each(&block)
+        return enum_for(__method__) unless block_given?
+        @children.reverse_each { |child| child.reverse_each(&block) }
+        self
+      end
+
+      def put(index, item)
+        child, offset, child_index = child_and_offset(index)
+        updated = child.put(offset, item)
+        return self if updated.equal?(child)
+        children = @children.dup
+        children[child_index] = updated
+        InternalNode.new(@height, children)
+      end
+
+      def slice_range(from, to)
+        first = @sizes.bsearch_index { |size| size > from }
+        last = @sizes.bsearch_index { |size| size >= to }
+        pieces = []
+
+        first.upto(last) do |child_index|
+          child = @children[child_index]
+          start = child_index == 0 ? 0 : @sizes[child_index - 1]
+          local_from = [from - start, 0].max
+          local_to = [to - start, child.size].min
+          piece = child.slice_range(local_from, local_to)
+          pieces << StructuralNode.raise_to(piece, @height - 1)
+        end
+
+        if pieces.size == 1
+          StructuralNode.minimize(pieces.first)
+        else
+          InternalNode.new(@height, pieces)
+        end
+      end
+
+      def to_a
+        @children.flat_map(&:to_a)
+      end
+    end
+
+    class CanonicalNode < StructuralNode
+      attr_reader :height, :root, :size
+
+      def initialize(height, root, size)
+        @height = height
+        @root = root
+        @size = size
+        freeze
+      end
+
+      def get(index)
+        node = @root
+        bitshift = @height * BITS_PER_LEVEL
+        while bitshift > 0
+          node = node[(index >> bitshift) & INDEX_MASK]
+          bitshift -= BITS_PER_LEVEL
+        end
+        node[index & INDEX_MASK]
+      end
+
+      def each(&block)
+        return enum_for(__method__) unless block_given?
+        self.class.traverse(@root, @height, &block)
+        self
+      end
+
+      def reverse_each(&block)
+        return enum_for(__method__) unless block_given?
+        self.class.reverse_traverse(@root, @height, &block)
+        self
+      end
+
+      def put(index, item)
+        updated = self.class.update_node(@root, @height * BITS_PER_LEVEL, index, item)
+        return self if updated.equal?(@root)
+        CanonicalNode.new(@height, updated, @size)
+      end
+
+      def children
+        capacity = 1 << (@height * BITS_PER_LEVEL)
+        @root.each_with_index.map do |child, index|
+          start = index * capacity
+          child_size = index == @root.size - 1 ? @size - start : capacity
+          self.class.wrap(child, @height - 1, child_size)
+        end
+      end
+
+      def slice_range(from, to)
+        return self if from == 0 && to == @size
+
+        if @height == 0
+          piece = LeafNode.new(@root, 0, @size).slice_range(from, to)
+          return StructuralNode.minimize(StructuralNode.raise_to(piece, 0))
+        end
+
+        capacity = 1 << (@height * BITS_PER_LEVEL)
+        first = from / capacity
+        last = (to - 1) / capacity
+        pieces = []
+
+        first.upto(last) do |index|
+          start = index * capacity
+          child_size = index == @root.size - 1 ? @size - start : capacity
+          local_from = [from - start, 0].max
+          local_to = [to - start, child_size].min
+          child = self.class.wrap(@root[index], @height - 1, child_size)
+          piece = child.slice_range(local_from, local_to)
+          pieces << StructuralNode.raise_to(piece, @height - 1)
+        end
+
+        if pieces.size == 1
+          StructuralNode.minimize(pieces.first)
+        else
+          InternalNode.new(@height, pieces)
+        end
+      end
+
+      def to_a
+        self.class.flatten(@root, @height, [])
+      end
+
+      def self.traverse(node, height, &block)
+        if height == 0
+          node.each(&block)
+        else
+          node.each { |child| traverse(child, height - 1, &block) }
+        end
+      end
+
+      def self.reverse_traverse(node, height, &block)
+        if height == 0
+          node.reverse_each(&block)
+        else
+          node.reverse_each { |child| reverse_traverse(child, height - 1, &block) }
+        end
+      end
+
+      def self.update_node(node, bitshift, index, item)
+        slot = (index >> bitshift) & INDEX_MASK
+        if bitshift > 0
+          child = update_node(node[slot], bitshift - BITS_PER_LEVEL, index, item)
+          item = child
+        end
+        return node if node[slot].equal?(item)
+        updated = node.dup
+        updated[slot] = item
+        updated.freeze
+      end
+
+      def self.wrap(node, height, size)
+        if height == 0
+          LeafNode.new(node, 0, size)
+        else
+          CanonicalNode.new(height, node, size)
+        end
+      end
+
+      def self.flatten(node, height, result)
+        if height == 0
+          result.concat(node)
+        else
+          node.each { |child| flatten(child, height - 1, result) }
+        end
+        result
+      end
+    end
+
     # Return the number of items in this `Vector`
     # @return [Integer]
     attr_reader :size
@@ -168,9 +432,8 @@ module Hamster
       raise IndexError, "index #{index} outside of vector bounds" if index < -@size
       index += @size if index < 0
       if index > @size
-        suffix = Array.new(index - @size, nil)
-        suffix << item
-        replace_suffix(@size, suffix)
+        padding = self.class.new(Array.new(index - @size, nil) << item)
+        self + padding
       else
         update_root(index, item)
       end
@@ -214,7 +477,11 @@ module Hamster
       return nil if @size == 0
       index += @size if index < 0
       return nil if index >= @size || index < 0
-      leaf_node_for(@root, @levels * BITS_PER_LEVEL, index)[index & INDEX_MASK]
+      if structural?
+        @root.get(index)
+      else
+        leaf_node_for(@root, @levels * BITS_PER_LEVEL, index)[index & INDEX_MASK]
+      end
     end
     alias :at :get
 
@@ -348,16 +615,14 @@ module Hamster
       index += @size if index < 0
 
       if index < @size
-        suffix = flatten_suffix(@root, @levels * BITS_PER_LEVEL, index, [])
-        suffix.unshift(*items)
-      elsif index == @size
-        suffix = items
+        prefix = subsequence(0, index)
+        suffix = subsequence(index, @size - index)
+        inserted = self.class.new(items)
+        return prefix + inserted + suffix
       else
-        suffix = Array.new(index - @size, nil).concat(items)
-        index = @size
+        padding = Array.new(index - @size, nil).concat(items)
+        return self + self.class.new(padding)
       end
-
-      replace_suffix(index, suffix)
     end
 
     # Return a new `Vector` with the element at `index` removed. If the given `index`
@@ -372,9 +637,7 @@ module Hamster
     def delete_at(index)
       return self if index >= @size || index < -@size
       index += @size if index < 0
-
-      suffix = flatten_suffix(@root, @levels * BITS_PER_LEVEL, index, [])
-      replace_suffix(index, suffix.tap { |a| a.shift })
+      subsequence(0, index) + subsequence(index + 1, @size - index - 1)
     end
 
     # Return a new `Vector` with the last element removed. Return `self` if
@@ -386,7 +649,7 @@ module Hamster
     # @return [Vector]
     def pop
       return self if @size == 0
-      replace_suffix(@size-1, [])
+      subsequence(0, @size - 1)
     end
 
     # Return a new `Vector` with `object` inserted before the first element,
@@ -428,7 +691,11 @@ module Hamster
     # @return [self, Enumerator]
     def each(&block)
       return to_enum unless block_given?
-      traverse_depth_first(@root, @levels, &block)
+      if structural?
+        @root.each(&block)
+      else
+        traverse_depth_first(@root, @levels, &block)
+      end
       self
     end
 
@@ -445,7 +712,11 @@ module Hamster
     # @return [self]
     def reverse_each(&block)
       return enum_for(:reverse_each) unless block_given?
-      reverse_traverse_depth_first(@root, @levels, &block)
+      if structural?
+        @root.reverse_each(&block)
+      else
+        reverse_traverse_depth_first(@root, @levels, &block)
+      end
       self
     end
 
@@ -597,9 +868,8 @@ module Hamster
     # @param other [Enumerable] The collection to concatenate onto this vector
     # @return [Vector]
     def +(other)
-      other = other.to_a
-      other = other.dup if other.frozen?
-      replace_suffix(@size, other)
+      return concat_vector(other) if other.is_a?(Vector)
+      concat_vector(self.class.new(other.to_a))
     end
     alias :concat :+
 
@@ -690,7 +960,7 @@ module Hamster
       return self if n == 0
       return self.class.empty if n >= @size
       raise ArgumentError, "attempt to drop negative size" if n < 0
-      self.class.new(flatten_suffix(@root, @levels * BITS_PER_LEVEL, n, []))
+      subsequence(n, @size - n)
     end
 
     # Return only the first `n` elements in a new `Vector`.
@@ -703,7 +973,8 @@ module Hamster
     # @return [Vector]
     def take(n)
       return self if n >= @size
-      self.class.new(super)
+      raise ArgumentError, "attempt to take negative size" if n < 0
+      subsequence(0, n)
     end
 
     # Drop elements up to, but not including, the first element for which the
@@ -793,16 +1064,16 @@ module Hamster
       length ||= @size - index # to the end of the array, if no length given
 
       if index < @size
-        suffix = flatten_suffix(@root, @levels * BITS_PER_LEVEL, index, [])
-        suffix.fill(object, 0, length)
-      elsif index == @size
-        suffix = Array.new(length, object)
+        kept = [length, @size - index].min
+        prefix = subsequence(0, index)
+        replacement = self.class.new([object] * kept)
+        extension = self.class.new([object] * (length - kept))
+        suffix = subsequence(index + kept, @size - index - kept)
+        prefix + replacement + extension + suffix
       else
-        suffix = Array.new(index - @size, nil).concat(Array.new(length, object))
-        index = @size
+        padding = Array.new(index - @size, nil).concat(Array.new(length, object))
+        self + self.class.new(padding)
       end
-
-      replace_suffix(index, suffix)
     end
 
     # When invoked with a block, yields all combinations of length `n` of items
@@ -1268,7 +1539,9 @@ module Hamster
     #
     # @return [Array]
     def to_a
-      if @levels == 0
+      if structural?
+        @root.to_a
+      elsif @levels == 0
         # When initializing a Vector with 32 or less items, we always make
         # sure @root is frozen, so we can return it directly here
         @root
@@ -1285,6 +1558,7 @@ module Hamster
     def eql?(other)
       return true if other.equal?(self)
       return false unless instance_of?(other.class) && @size == other.size
+      return structural_eql?(other) if structural? || other.instance_variable_get(:@root).is_a?(StructuralNode)
       @root.eql?(other.instance_variable_get(:@root))
     end
 
@@ -1307,6 +1581,91 @@ module Hamster
 
     private
 
+    def structural?
+      @root.is_a?(StructuralNode)
+    end
+
+    def canonical_structural_node
+      CanonicalNode.new(@levels, @root, @size)
+    end
+
+    def structural_alloc(node, size)
+      vector = self.class.alloc(node, size, node.height)
+      vector.freeze
+    end
+
+    def concat_vector(other)
+      return other if @size == 0
+      return self if other.size == 0
+
+      left = structural? ? @root : canonical_structural_node
+      right = other.instance_variable_get(:@root)
+      right = CanonicalNode.new(
+        other.instance_variable_get(:@levels),
+        right,
+        other.size
+      ) unless right.is_a?(StructuralNode)
+
+      target_height = [left.height, right.height].max
+      left = StructuralNode.raise_to(left, target_height)
+      right = StructuralNode.raise_to(right, target_height)
+      nodes = concat_nodes(left, right)
+      node = nodes.size == 1 ? nodes.first : InternalNode.new(target_height + 1, nodes)
+      structural_alloc(node, @size + other.size)
+    end
+
+    def concat_nodes(left, right)
+      if left.height == 0
+        items = left.to_a.concat(right.to_a)
+        if items.size <= BLOCK_SIZE
+          [LeafNode.new(items.freeze)]
+        else
+          [LeafNode.new(items.take(BLOCK_SIZE).freeze),
+           LeafNode.new(items[BLOCK_SIZE..-1].freeze)]
+        end
+      else
+        boundary = concat_nodes(left.children.last, right.children.first)
+        children = left.children[0...-1] + boundary + right.children[1..-1]
+        if children.size <= BLOCK_SIZE
+          [InternalNode.new(left.height, children)]
+        else
+          split_nodes(left.height, children)
+        end
+      end
+    end
+
+    def split_nodes(height, children)
+      boundary = concat_nodes(children[BLOCK_SIZE - 1], children[BLOCK_SIZE])
+      left = children.take(BLOCK_SIZE - 1) + boundary[0, 1]
+      right = (boundary.size == 1 ? [] : boundary[1..-1]) + children[(BLOCK_SIZE + 1)..-1]
+      result = [InternalNode.new(height, left)]
+      result << InternalNode.new(height, right) unless right.empty?
+      result
+    end
+
+    def structural_append(item)
+      concat_vector(self.class.new([item]))
+    end
+
+    def structural_eql?(other)
+      left = structural? ? @root : canonical_structural_node
+      right_root = other.instance_variable_get(:@root)
+      right = right_root.is_a?(StructuralNode) ? right_root : CanonicalNode.new(
+        other.instance_variable_get(:@levels),
+        right_root,
+        other.size
+      )
+
+      left_values = left.each
+      right_values = right.each
+      loop do
+        return false unless left_values.next == right_values.next
+      end
+      true
+    rescue StopIteration
+      true
+    end
+
     def traverse_depth_first(node, level, &block)
       return node.each(&block) if level == 0
       node.each { |child| traverse_depth_first(child, level - 1, &block) }
@@ -1326,6 +1685,19 @@ module Hamster
     end
 
     def update_root(index, item)
+      if structural?
+        if index < @size
+          updated = @root.put(index, item)
+          return self if updated.equal?(@root)
+          return structural_alloc(updated, @size)
+        end
+        appended = structural_append(item)
+        return appended if index == @size
+
+        padding = self.class.new(Array.new(index - @size, nil) << item)
+        return self + padding
+      end
+
       root, levels = @root, @levels
       while index >= (1 << (BITS_PER_LEVEL * (levels + 1)))
         root = [root].freeze
@@ -1353,40 +1725,6 @@ module Hamster
       end
     end
 
-    def flatten_range(node, bitshift, from, to)
-      from_slot = (from >> bitshift) & INDEX_MASK
-      to_slot   = (to   >> bitshift) & INDEX_MASK
-
-      if bitshift == 0 # are we at the bottom?
-        node.slice(from_slot, to_slot-from_slot+1)
-      elsif from_slot == to_slot
-        flatten_range(node[from_slot], bitshift - BITS_PER_LEVEL, from, to)
-      else
-        # the following bitmask can be used to pick out the part of the from/to indices
-        #   which will be used to direct path BELOW this node
-        mask   = ((1 << bitshift) - 1)
-        result = []
-
-        if from & mask == 0
-          flatten_node(node[from_slot], bitshift - BITS_PER_LEVEL, result)
-        else
-          result.concat(flatten_range(node[from_slot], bitshift - BITS_PER_LEVEL, from, from | mask))
-        end
-
-        (from_slot+1).upto(to_slot-1) do |slot_index|
-          flatten_node(node[slot_index], bitshift - BITS_PER_LEVEL, result)
-        end
-
-        if to & mask == mask
-          flatten_node(node[to_slot], bitshift - BITS_PER_LEVEL, result)
-        else
-          result.concat(flatten_range(node[to_slot], bitshift - BITS_PER_LEVEL, to & ~mask, to))
-        end
-
-        result
-      end
-    end
-
     def flatten_node(node, bitshift, result)
       if bitshift == 0
         result.concat(node)
@@ -1403,106 +1741,14 @@ module Hamster
       return nil if from > @size || from < 0 || length < 0
       length = @size - from if @size < from + length
       return self.class.empty if length == 0
-      self.class.new(flatten_range(@root, @levels * BITS_PER_LEVEL, from, from + length - 1))
-    end
+      return self if from == 0 && length == @size
 
-    def flatten_suffix(node, bitshift, from, result)
-      from_slot = (from >> bitshift) & INDEX_MASK
-
-      if bitshift == 0
-        if from_slot == 0
-          result.concat(node)
-        else
-          result.concat(node.slice(from_slot, 32)) # entire suffix of node. excess length is ignored by #slice
-        end
+      if structural?
+        node = @root.slice_range(from, from + length)
+        structural_alloc(node, length)
       else
-        mask = ((1 << bitshift) - 1)
-        if from & mask == 0
-          from_slot.upto(node.size-1) do |i|
-            flatten_node(node[i], bitshift - BITS_PER_LEVEL, result)
-          end
-        elsif child = node[from_slot]
-          flatten_suffix(child, bitshift - BITS_PER_LEVEL, from, result)
-          (from_slot+1).upto(node.size-1) do |i|
-            flatten_node(node[i], bitshift - BITS_PER_LEVEL, result)
-          end
-        end
-        result
-      end
-    end
-
-    def replace_suffix(from, suffix)
-      # new suffix can go directly after existing elements
-      raise IndexError if from > @size
-      root, levels = @root, @levels
-
-      if (from >> (BITS_PER_LEVEL * (@levels + 1))) != 0
-        # index where new suffix goes doesn't fall within current tree
-        # we will need to deepen tree
-        root = [root].freeze
-        levels += 1
-      end
-
-      new_size = from + suffix.size
-      root = replace_node_suffix(root, levels * BITS_PER_LEVEL, from, suffix)
-
-      if !suffix.empty?
-        levels.times { suffix = suffix.each_slice(32).to_a }
-        root.concat(suffix)
-        while root.size > 32
-          root = root.each_slice(32).to_a
-          levels += 1
-        end
-      else
-        while root.size == 1 && levels > 0
-          root = root[0]
-          levels -= 1
-        end
-      end
-
-      self.class.alloc(root.freeze, new_size, levels)
-    end
-
-    def replace_node_suffix(node, bitshift, from, suffix)
-      from_slot = (from >> bitshift) & INDEX_MASK
-
-      if bitshift == 0
-        if from_slot == 0
-          suffix.shift(32)
-        else
-          node.take(from_slot).concat(suffix.shift(32 - from_slot))
-        end
-      else
-        mask = ((1 << bitshift) - 1)
-        if from & mask == 0
-          if from_slot == 0
-            new_node = suffix.shift(32 * (1 << bitshift))
-            while bitshift != 0
-              new_node = new_node.each_slice(32).to_a
-              bitshift -= BITS_PER_LEVEL
-            end
-            new_node
-          else
-            result = node.take(from_slot)
-            remainder = suffix.shift((32 - from_slot) * (1 << bitshift))
-            while bitshift != 0
-              remainder = remainder.each_slice(32).to_a
-              bitshift -= BITS_PER_LEVEL
-            end
-            result.concat(remainder)
-          end
-        elsif child = node[from_slot]
-          result = node.take(from_slot)
-          result.push(replace_node_suffix(child, bitshift - BITS_PER_LEVEL, from, suffix))
-          remainder = suffix.shift((31 - from_slot) * (1 << bitshift))
-          while bitshift != 0
-            remainder = remainder.each_slice(32).to_a
-            bitshift -= BITS_PER_LEVEL
-          end
-          result.concat(remainder)
-        else
-          raise "Shouldn't happen"
-        end
+        node = canonical_structural_node.slice_range(from, from + length)
+        structural_alloc(node, length)
       end
     end
   end
