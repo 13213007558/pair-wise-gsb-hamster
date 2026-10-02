@@ -161,6 +161,64 @@ module Hamster
       list.tail
     end
 
+    # Fairly concatenate a (possibly infinite) list of (possibly infinite)
+    # lists, by interleaving them along anti-diagonals: first item 0 of list 0,
+    # then item 0 of list 1 and item 1 of list 0, and so on. Every element at
+    # finite coordinates (i, j) -- item j of list i -- is therefore reached
+    # within a finite number of steps.
+    #
+    # Each element is realized only when the consumer reaches its position in
+    # the output, so taking a small prefix only realizes a small prefix of each
+    # input. Empty lists are skipped. If realizing an element (or a list)
+    # raises, all preceding elements in the fair order are produced first, and
+    # the exception surfaces exactly at the position of the failing element.
+    #
+    # @private
+    def self.fair_concat(lists)
+      fair_concat_begin(lists, EmptyList)
+    end
+
+    # Begin a new anti-diagonal: pull one more list off the remaining lists
+    # (skipping empty ones), push it in front of the active lists, and emit
+    # the heads of all active lists, newest first.
+    #
+    # @private
+    def self.fair_concat_begin(lists, active)
+      LazyList.new do
+        loop do
+          unless lists.empty?
+            list = lists.head
+            lists = lists.tail
+            active = active.cons(list) unless list.empty?
+          end
+          break EmptyList if active.empty?
+          break fair_concat_emit(active, EmptyList, lists)
+        end
+      end
+    end
+
+    # Emit the head of each pending list (newest first), one output element
+    # per realized node, collecting the non-empty tails as survivors (in
+    # reverse). When the pending lists are exhausted, the survivors are
+    # reversed back into newest-first order and the next diagonal begins.
+    #
+    # @private
+    def self.fair_concat_emit(pending, survivors, lists)
+      LazyList.new do
+        list = pending.head
+        rest = pending.tail
+        Cons.new(list.head, LazyList.new do
+          tail = list.tail
+          survivors = survivors.cons(tail) unless tail.empty?
+          if rest.empty?
+            fair_concat_begin(lists, survivors.reverse)
+          else
+            fair_concat_emit(rest, survivors, lists)
+          end
+        end)
+      end
+    end
+
     # Return the number of items in this `List`.
     # @return [Integer]
     def size
@@ -253,6 +311,60 @@ module Hamster
         next tail.flat_map(&block) if head_list.empty?
         Cons.new(head_list.first, head_list.drop(1).append(tail.flat_map(&block)))
       end
+    end
+
+    # Like {#flat_map}, but the lists produced by the block are interleaved
+    # fairly (along anti-diagonals) instead of being concatenated depth-first.
+    # This means the block may return infinite lists, and this list may itself
+    # be infinite: every element at finite coordinates -- item j of the list
+    # produced for item i -- appears at a finite position in the output.
+    #
+    # The result is truly lazy: taking a small prefix only realizes a small
+    # prefix of this list and of each list produced by the block, and each
+    # element is realized at most once, no matter how often the prefix is
+    # re-traversed. Empty lists returned by the block are skipped. If the
+    # block (or one of the returned lists) raises, all elements which come
+    # earlier in the fair order are produced first, and the exception is
+    # raised exactly when the consumer reaches the failing position.
+    #
+    # @example
+    #   naturals = Hamster.iterate(0) { |n| n + 1 }
+    #   naturals.fair_flat_map { |n| Hamster.repeat(n) }.take(6)
+    #   # => Hamster::List[0, 1, 0, 2, 1, 0]
+    #
+    # @return [List, Enumerator]
+    # @yield [item] Once for each item.
+    # @yieldreturn [List, #each] The items to interleave into the output.
+    def fair_flat_map(&block)
+      return enum_for(:fair_flat_map) unless block_given?
+      lists = map do |item|
+        result = block.call(item)
+        result.is_a?(List) ? result : List.from_enum(result)
+      end
+      List.fair_concat(lists)
+    end
+
+    # Return a lazy, fairly ordered Cartesian product of this list and
+    # `other`, as a list of 2-element arrays `[item, other_item]`. Unlike a
+    # depth-first product (which would never get past the first item of an
+    # infinite list), the pairs are interleaved along anti-diagonals, so every
+    # pair of finite indexes appears at a finite position, even when both
+    # lists are infinite.
+    #
+    # The result is truly lazy and memoized: taking a small prefix only
+    # realizes a small prefix of each input, and re-traversing the output
+    # never re-realizes an input element.
+    #
+    # @example
+    #   naturals = Hamster.iterate(0) { |n| n + 1 }
+    #   naturals.fair_product(naturals).take(6)
+    #   # => Hamster::List[[0, 0], [1, 0], [0, 1], [2, 0], [1, 1], [0, 2]]
+    #
+    # @param other [List, #each] The list to combine with this one.
+    # @return [List]
+    def fair_product(other)
+      other = List.from_enum(other) unless other.is_a?(List)
+      fair_flat_map { |item| other.map { |other_item| [item, other_item] } }
     end
 
     # Return a `List` which contains all the items for which the given block
