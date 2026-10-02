@@ -2,6 +2,7 @@ require "hamster/immutable"
 require "hamster/enumerable"
 require "hamster/hash"
 require "hamster/associable"
+require "hamster/transient"
 
 module Hamster
   # A `Vector` is an ordered, integer-indexed collection of objects. Like
@@ -387,6 +388,43 @@ module Hamster
     def pop
       return self if @size == 0
       replace_suffix(@size-1, [])
+    end
+
+    # Return a transient, mutable editor for this vector, for efficiently
+    # performing a batch of updates within a single, short-lived editing
+    # session. Unlike repeated calls to {#put} or {#add}, the editor mutates
+    # nodes which are exclusively owned by the session in place, and copies
+    # nodes shared with this vector (or any other collection) on first
+    # touch, so this vector and everything derived from it is left
+    # unchanged.
+    #
+    # The editor is confined to the thread which created it. Seal it with
+    # {TransientVector#persistent!} to obtain an immutable +Vector+ again;
+    # any use of the editor after sealing raises {TransientError}.
+    #
+    # When a block is given, the editor is yielded and the sealed +Vector+
+    # is returned; the editor is invalidated as soon as the block exits,
+    # even if it raises, so a half-finished session cannot be resumed
+    # through a saved reference.
+    #
+    # @example
+    #   vector = Hamster::Vector[1, 2, 3]
+    #   vector.transient { |t| 10_000.times { |i| t.push(i) } }.size
+    #   # => 10003
+    #   vector # => Hamster::Vector[1, 2, 3]
+    #
+    # @yieldparam editor [TransientVector] transient editor seeded from this vector
+    # @return [TransientVector, Vector] the editor when no block is given,
+    #   otherwise the sealed +Vector+
+    def transient
+      editor = TransientVector.new(self.class, @root, @size, @levels)
+      return editor unless block_given?
+      begin
+        yield editor
+        editor.persistent!
+      ensure
+        editor.invalidate!
+      end
     end
 
     # Return a new `Vector` with `object` inserted before the first element,

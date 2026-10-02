@@ -10,6 +10,14 @@ module Hamster
     # Returns the number of key-value pairs in the trie.
     attr_reader :size
 
+    # @private
+    # Token identifying the transient editing session which currently owns
+    # this node. Nodes carrying the active session's token may be mutated in
+    # place; all others must be copied before mutation, so that persistent
+    # collections (and other editing sessions) which share structure with
+    # this node are never disturbed.
+    attr_accessor :transient_owner
+
     def initialize(significant_bits, size = 0, entries = [], children = [])
       @significant_bits = significant_bits
       @entries = entries
@@ -196,6 +204,40 @@ module Hamster
       find_and_delete(key) || Trie.new(@significant_bits)
     end
 
+    # Mutating version of {#put}, for use by transient editors. Only nodes
+    # owned by +token+ are modified in place; any node shared with a
+    # persistent collection is copied on first touch. Returns the node which
+    # should take this node's place in its parent (or as the root).
+    #
+    # @private
+    def put_transient(key, value, token)
+      ensure_transient_owner(token).put_transient_owned(key, value, token)
+    end
+
+    # Mutating version of {#delete}, for use by transient editors. Only
+    # nodes owned by +token+ are modified in place. Returns the node which
+    # should take this node's place, or +nil+ if the trie became empty.
+    #
+    # @private
+    def delete_transient(key, token)
+      ensure_transient_owner(token).delete_transient_owned(key, token)
+    end
+
+    # Returns a node owned by +token+: +self+ if this node is already owned
+    # by the session, otherwise a shallow copy (with its own entry/child
+    # arrays) which is marked as owned by the session.
+    #
+    # @private
+    def ensure_transient_owner(token)
+      if @transient_owner.equal?(token)
+        self
+      else
+        copy = Trie.new(@significant_bits, @size, @entries.dup, @children.dup)
+        copy.transient_owner = token
+        copy
+      end
+    end
+
     # Delete multiple elements from a Trie.  This is more efficient than
     # several calls to `#delete`.
     #
@@ -280,6 +322,79 @@ module Hamster
     alias :== :eql?
 
     protected
+
+    # In-place put on a node already owned by the editing session.
+    # Returns +self+.
+    def put_transient_owned(key, value, token)
+      index = index_for(key)
+      entry = @entries[index]
+      if !entry
+        @size += 1
+        key = key.dup.freeze if key.is_a?(String) && !key.frozen?
+        @entries[index] = [key, value].freeze
+      elsif entry[0].eql?(key)
+        key = key.dup.freeze if key.is_a?(String) && !key.frozen?
+        @entries[index] = [key, value].freeze
+      else
+        child = @children[index]
+        if child
+          old_child_size = child.size
+          @children[index] = child.put_transient(key, value, token)
+          @size += @children[index].size - old_child_size
+        else
+          @children[index] = Trie.new(@significant_bits + 5).put!(key, value)
+          @size += 1
+        end
+      end
+      self
+    end
+
+    # In-place delete on a node already owned by the editing session.
+    # Returns the node, or +nil+ if it became empty.
+    def delete_transient_owned(key, token)
+      index = index_for(key)
+      entry = @entries[index]
+      if entry && entry[0].eql?(key)
+        @size -= 1
+        child = @children[index]
+        if child
+          @children[index] = child.ensure_transient_owner(token).delete_first_transient(token) do |promoted|
+            @entries[index] = promoted
+          end
+        else
+          @entries[index] = nil
+        end
+      else
+        child = @children[index]
+        if child
+          old_child_size = child.size
+          new_child = child.ensure_transient_owner(token).delete_transient_owned(key, token)
+          @children[index] = new_child
+          @size -= old_child_size - (new_child ? new_child.size : 0)
+        end
+      end
+      @size == 0 ? nil : self
+    end
+
+    # Removes the first entry stored in this (owned) node's subtree, yields
+    # the removed entry, and returns the node or +nil+ if it became empty.
+    # The block is used by the parent to fill the vacated slot, mirroring
+    # {#delete_at}.
+    def delete_first_transient(token)
+      index = @entries.index { |e| e }
+      entry = @entries[index]
+      @size -= 1
+      child = @children[index]
+      if child
+        @children[index] = child.ensure_transient_owner(token).delete_first_transient(token) do |promoted|
+          @entries[index] = promoted
+        end
+      else
+        @entries[index] = nil
+      end
+      yield(entry)
+      @size == 0 ? nil : self
+    end
 
     # Returns a replacement instance after removing the specified key.
     # If not found, returns <tt>self</tt>.

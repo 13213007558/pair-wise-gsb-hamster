@@ -5,6 +5,7 @@ require "hamster/trie"
 require "hamster/set"
 require "hamster/vector"
 require "hamster/associable"
+require "hamster/transient"
 
 module Hamster
   # A `Hamster::Hash` maps a set of unique keys to corresponding values, much
@@ -316,6 +317,44 @@ module Hamster
     # @return [Hash]
     def delete(key)
       derive_new_hash(@trie.delete(key))
+    end
+
+    # Return a transient, mutable editor for this hash, for efficiently
+    # performing a batch of updates within a single, short-lived editing
+    # session. Unlike repeated calls to {#put} (or {Hamster::MutableHash},
+    # which swaps persistent versions on every update), the editor mutates
+    # nodes which are exclusively owned by the session in place, and copies
+    # nodes shared with this hash (or any other collection) on first touch,
+    # so this hash and everything derived from it is left unchanged.
+    #
+    # The editor is confined to the thread which created it. Seal it with
+    # {TransientHash#persistent!} to obtain an immutable +Hash+ again; any
+    # use of the editor after sealing raises {TransientError}.
+    #
+    # When a block is given, the editor is yielded and the block's own
+    # return value is discarded: the sealed +Hash+ is returned instead, and
+    # the editor is invalidated as soon as the block exits, even if it
+    # raises, so a half-finished session cannot be resumed through a saved
+    # reference.
+    #
+    # @example
+    #   hash = Hamster::Hash[1 => "a"]
+    #   hash.transient { |t| (2..10_000).each { |i| t.put(i, i.to_s) } }
+    #   # => Hamster::Hash[1 => "a", 2 => "2", ..., 10000 => "10000"]
+    #   hash # => Hamster::Hash[1 => "a"]
+    #
+    # @yieldparam editor [TransientHash] transient editor seeded from this hash
+    # @return [TransientHash, Hash] the editor when no block is given,
+    #   otherwise the sealed +Hash+
+    def transient
+      editor = TransientHash.new(self.class, @trie, @default)
+      return editor unless block_given?
+      begin
+        yield editor
+        editor.persistent!
+      ensure
+        editor.invalidate!
+      end
     end
 
     # Call the block once for each key/value pair in this `Hash`, passing the key/value

@@ -119,6 +119,21 @@ Or more succinctly:
 counters.put(:odds, &:next)         # => {:odds => 1, :evens => 0}
 ```
 
+When applying a large batch of updates, `Hash#transient` (and likewise
+`Vector#transient`) provides a short-lived, mutable editor which updates
+nodes owned by the editing session in place, instead of copying them on
+every update. Seal it with `persistent!` to get an immutable collection
+back. The original collection is never modified, the editor is confined to
+the thread which created it, and it becomes unusable as soon as the
+session ends:
+
+``` ruby
+hash = Hamster::Hash[1 => "one"]
+hash.transient { |t| (2..10_000).each { |i| t.put(i, i.to_s) } }
+# => Hamster::Hash[1 => "one", 2 => "two", ...]
+hash                                # => Hamster::Hash[1 => "one"]
+```
+
 This is just the beginning; see the [API documentation][HASH-DOC] for details on all `Hash` methods.
 
 

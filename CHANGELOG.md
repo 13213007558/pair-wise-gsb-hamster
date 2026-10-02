@@ -1,6 +1,10 @@
 Changelog
 =========
 
+  - Unreleased
+    * [Added] Hamster::Hash#transient and Hamster::Vector#transient for
+      efficient batch updates through thread-confined, single-use mutable
+      editors which seal back into immutable collections
   - 3.0.0
     * [Changed] the behavior of Hamster::Hash#values_at
     * [Added] Hamster::Hash#dig and Hamster::Enumerable#grep_v
