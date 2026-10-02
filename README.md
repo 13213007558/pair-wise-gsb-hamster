@@ -15,8 +15,8 @@ Hamster
 
 Efficient, immutable, and thread-safe collection classes for Ruby.
 
-Hamster provides 6 [Persistent Data
-Structures][PDS]: [`Hash`][HASH-DOC], [`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`SortedSet`][SORTED-SET-DOC], [`List`][LIST-DOC], and [`Deque`][DEQUE-DOC] (which works as an immutable queue or stack).
+Hamster provides 7 [Persistent Data
+Structures][PDS]: [`Hash`][HASH-DOC], [`OrderedHash`][ORDERED-HASH-DOC], [`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`SortedSet`][SORTED-SET-DOC], [`List`][LIST-DOC], and [`Deque`][DEQUE-DOC] (which works as an immutable queue or stack).
 
 Hamster collections are **immutable**. Whenever you modify a Hamster
 collection, the original is preserved and a modified copy is returned. This
@@ -41,6 +41,7 @@ process "infinitely large" lists.
 
 [PDS]: http://en.wikipedia.org/wiki/Persistent_data_structure
 [HASH-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Hash
+[ORDERED-HASH-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/OrderedHash
 [SET-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Set
 [VECTOR-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Vector
 [LIST-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/List
@@ -61,6 +62,7 @@ Or if you prefer to only pull in certain collection types:
 
 ``` ruby
 require "hamster/hash"
+require "hamster/ordered_hash"
 require "hamster/vector"
 require "hamster/set"
 require "hamster/sorted_set"
@@ -120,6 +122,40 @@ counters.put(:odds, &:next)         # => {:odds => 1, :evens => 0}
 ```
 
 This is just the beginning; see the [API documentation][HASH-DOC] for details on all `Hash` methods.
+
+
+<h2>OrderedHash <span style="font-size:0.7em">(<a href="http://rubydoc.info/github/hamstergem/hamster/master/Hamster/OrderedHash">API Documentation</a>)</span></h2>
+
+An `OrderedHash` is like a `Hash`, but it preserves the *insertion order* of
+its keys when enumerating, just like Ruby's built-in `Hash`. This is useful
+when the order in which entries were created matters -- for example, when
+editing configuration files whose field order should survive a round-trip.
+
+``` ruby
+config = Hamster::OrderedHash[font_size: 10, font_family: "Arial"]
+config.keys                            # => [:font_size, :font_family]
+config.put(:color, "red").keys         # => [:font_size, :font_family, :color]
+```
+
+Re-storing an existing key replaces its value but keeps it in place, while a
+key which is deleted and later re-added moves to the end:
+
+``` ruby
+config.put(:font_size, 12).keys        # => [:font_size, :font_family]
+config.delete(:font_size).put(:font_size, 12).keys
+# => [:font_family, :font_size]
+```
+
+`OrderedHash#merge` walks the other collection in its own iteration order:
+on conflicting keys the other collection's value wins but the key keeps its
+position, and keys which are not yet present are appended at the end:
+
+``` ruby
+config.merge(font_family: "Courier", lang: "en").keys
+# => [:font_size, :font_family, :lang]
+```
+
+See the [API documentation][ORDERED-HASH-DOC] for details on all `OrderedHash` methods.
 
 
 <h2>Vector <span style="font-size:0.7em">(<a href="http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Vector">API Documentation</a>)</span></h2>

@@ -4,6 +4,7 @@ CodeClimate::TestReporter.start
 require "pry"
 require "rspec"
 require "hamster/hash"
+require "hamster/ordered_hash"
 require "hamster/set"
 require "hamster/vector"
 require "hamster/sorted_set"
@@ -14,6 +15,7 @@ require "hamster/core_ext"
 V = Hamster::Vector
 L = Hamster::List
 H = Hamster::Hash
+OH = Hamster::OrderedHash
 S = Hamster::Set
 SS = Hamster::SortedSet
 D = Hamster::Deque
