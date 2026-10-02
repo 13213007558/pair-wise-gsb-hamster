@@ -1,6 +1,10 @@
 Changelog
 =========
 
+  - master (unreleased)
+    * [Added] Structural-sharing concatenation (Vector#+) and slicing
+      (Vector#take, #drop, #slice) for Hamster::Vector
+
   - 3.0.0
     * [Changed] the behavior of Hamster::Hash#values_at
     * [Added] Hamster::Hash#dig and Hamster::Enumerable#grep_v

@@ -590,6 +590,12 @@ module Hamster
     # Return a new `Vector` built by concatenating this one with `other`. `other`
     # can be any object which is convertible to an `Array` using `#to_a`.
     #
+    # When `other` is itself a `Vector` and this vector's size is a multiple
+    # of the internal block size, the two trees are merged directly: the other
+    # vector's leaf nodes are grafted on whole and shared with the result, so
+    # its elements are never copied. Only the nodes along the seam between the
+    # two vectors are newly allocated.
+    #
     # @example
     #   Hamster::Vector["A", "B", "C"] + ["D", "E"]
     #   # => Hamster::Vector["A", "B", "C", "D", "E"]
@@ -597,6 +603,11 @@ module Hamster
     # @param other [Enumerable] The collection to concatenate onto this vector
     # @return [Vector]
     def +(other)
+      if other.is_a?(Hamster::Vector)
+        return self if other.empty?
+        return other if @size == 0 && other.instance_of?(self.class)
+        return concat_vector(other) if @size != 0 && (@size & INDEX_MASK) == 0
+      end
       other = other.to_a
       other = other.dup if other.frozen?
       replace_suffix(@size, other)
@@ -690,7 +701,7 @@ module Hamster
       return self if n == 0
       return self.class.empty if n >= @size
       raise ArgumentError, "attempt to drop negative size" if n < 0
-      self.class.new(flatten_suffix(@root, @levels * BITS_PER_LEVEL, n, []))
+      slice_tree(n, @size)
     end
 
     # Return only the first `n` elements in a new `Vector`.
@@ -702,8 +713,10 @@ module Hamster
     # @param n [Integer] The number of elements to retain
     # @return [Vector]
     def take(n)
+      raise ArgumentError, "attempt to take negative size" if n < 0
       return self if n >= @size
-      self.class.new(super)
+      return self.class.empty if n == 0
+      replace_suffix(n, [])
     end
 
     # Drop elements up to, but not including, the first element for which the
@@ -1403,7 +1416,158 @@ module Hamster
       return nil if from > @size || from < 0 || length < 0
       length = @size - from if @size < from + length
       return self.class.empty if length == 0
-      self.class.new(flatten_range(@root, @levels * BITS_PER_LEVEL, from, from + length - 1))
+      slice_tree(from, from + length)
+    end
+
+    # Build a new `Vector` holding the elements at indices [from, to), sharing
+    # whole nodes of this vector's tree wherever the boundaries allow it.
+    # Only the nodes along the two edges of the range are newly allocated;
+    # everything in between is shared. When `from` does not fall on a leaf
+    # boundary, the leaves it touches have to be re-chunked, which is done by
+    # flattening just the requested range (never the whole vector).
+    def slice_tree(from, to)
+      if (from & INDEX_MASK) != 0
+        return self.class.new(flatten_range(@root, @levels * BITS_PER_LEVEL, from, to - 1))
+      end
+
+      if (to & INDEX_MASK) != 0 && to != @size
+        # range ends in the middle of a leaf: share the whole leaves before
+        # it, and copy the partial tail of the final leaf
+        nodes = from < (to & ~INDEX_MASK) ? collect_level_nodes(0, from, to & ~INDEX_MASK) : []
+        nodes << leaf_node_for(@root, @levels * BITS_PER_LEVEL, to & ~INDEX_MASK)[0, to & INDEX_MASK]
+        levels = 0
+      else
+        # both ends line up with whole nodes; share them directly at the
+        # highest level of the tree they are aligned with
+        align = alignment_of(from)
+        align = to == @size ? align : [align, alignment_of(to)].min
+        level = align - 1
+        nodes = collect_level_nodes(level, from, to)
+        levels = level
+      end
+
+      while nodes.size > BLOCK_SIZE
+        nodes = nodes.each_slice(BLOCK_SIZE).to_a
+        levels += 1
+      end
+      root = nodes
+      levels += 1
+      while levels > 0 && root.size == 1
+        root = root[0]
+        levels -= 1
+      end
+      self.class.alloc(root.freeze, to - from, levels)
+    end
+
+    # The largest n such that `index` is a multiple of BLOCK_SIZE ** n, i.e.
+    # the number of tree levels whose node boundaries line up with `index`.
+    def alignment_of(index)
+      n = 0
+      n += 1 while n <= @levels && (index & ((1 << (BITS_PER_LEVEL * (n + 1))) - 1)) == 0
+      n
+    end
+
+    # Gather the sequence of whole nodes at the given tree level covering the
+    # index range [from, to). Both ends must line up with node boundaries at
+    # that level (except that `to` may be the end of the vector, in which case
+    # the last node may be partial). The nodes are shared with this vector's
+    # tree, not copied, and only the spines above the two edges are visited.
+    def collect_level_nodes(level, from, to)
+      collect_nodes_at_level(@root, @levels * BITS_PER_LEVEL, from, to, level * BITS_PER_LEVEL, [])
+    end
+
+    def collect_nodes_at_level(node, bitshift, from, to, target, result)
+      if bitshift == target
+        result << node
+      else
+        from_slot = (from >> bitshift) & INDEX_MASK
+        to_slot   = ((to - 1) >> bitshift) & INDEX_MASK
+        if from_slot == to_slot
+          collect_nodes_at_level(node[from_slot], bitshift - BITS_PER_LEVEL, from, to, target, result)
+        else
+          mask = (1 << bitshift) - 1
+          collect_nodes_at_level(node[from_slot], bitshift - BITS_PER_LEVEL, from, (from | mask) + 1, target, result)
+          (from_slot + 1).upto(to_slot - 1) do |slot|
+            child_from = (from & ~mask) + ((slot - from_slot) << bitshift)
+            collect_nodes_at_level(node[slot], bitshift - BITS_PER_LEVEL, child_from, child_from + (1 << bitshift), target, result)
+          end
+          collect_nodes_at_level(node[to_slot], bitshift - BITS_PER_LEVEL, (to - 1) & ~mask, to, target, result)
+        end
+      end
+      result
+    end
+
+    # Concatenate another `Vector`'s tree onto this one, sharing structure.
+    # This vector's size must be a multiple of BLOCK_SIZE, so the other
+    # vector's leaf nodes can be grafted on whole: none of its elements are
+    # copied, only the nodes along the seam are newly allocated.
+    def concat_vector(other)
+      leaves = other.send(:collect_level_nodes, 0, 0, other.size)
+      root, levels, from = @root, @levels, @size
+
+      if (from >> (BITS_PER_LEVEL * (levels + 1))) != 0
+        # current root is full; the tree needs to deepen before grafting
+        root = [root].freeze
+        levels += 1
+      end
+
+      root = graft_leaves(root, levels * BITS_PER_LEVEL, from, leaves)
+
+      if !leaves.empty?
+        # remaining leaves spill past the current tree; chunk them into
+        # parents and append them at the root, deepening as needed
+        (levels - 1).times { leaves = leaves.each_slice(BLOCK_SIZE).to_a }
+        root = root + leaves
+        while root.size > BLOCK_SIZE
+          root = root.each_slice(BLOCK_SIZE).to_a
+          levels += 1
+        end
+      else
+        while root.size == 1 && levels > 0
+          root = root[0]
+          levels -= 1
+        end
+      end
+
+      self.class.alloc(root.freeze, from + other.size, levels)
+    end
+
+    # Fill in the tree from position `from` (a multiple of BLOCK_SIZE) with
+    # whole shared leaf nodes destructively shifted off `leaves`. Only the
+    # nodes along the right edge are copied; everything else is shared.
+    def graft_leaves(node, bitshift, from, leaves)
+      from_slot = (from >> bitshift) & INDEX_MASK
+
+      if bitshift == 0
+        leaves.shift
+      else
+        mask = (1 << bitshift) - 1
+        if from & mask == 0
+          if from_slot == 0
+            take_subtree(leaves, bitshift)
+          else
+            fill = leaves.shift((BLOCK_SIZE - from_slot) << (bitshift - BITS_PER_LEVEL))
+            (bitshift / BITS_PER_LEVEL - 1).times { fill = fill.each_slice(BLOCK_SIZE).to_a }
+            node.take(from_slot).concat(fill).freeze
+          end
+        elsif child = node[from_slot]
+          result = node.take(from_slot)
+          result.push(graft_leaves(child, bitshift - BITS_PER_LEVEL, from, leaves))
+          fill = leaves.shift((BLOCK_SIZE - 1 - from_slot) << (bitshift - BITS_PER_LEVEL))
+          (bitshift / BITS_PER_LEVEL - 1).times { fill = fill.each_slice(BLOCK_SIZE).to_a }
+          result.concat(fill).freeze
+        else
+          raise "Shouldn't happen"
+        end
+      end
+    end
+
+    # Build a complete subtree of the given height from `1 << bitshift`
+    # shared leaf nodes destructively shifted off `leaves`.
+    def take_subtree(leaves, bitshift)
+      fill = leaves.shift(1 << bitshift)
+      (bitshift / BITS_PER_LEVEL - 1).times { fill = fill.each_slice(BLOCK_SIZE).to_a }
+      fill.freeze
     end
 
     def flatten_suffix(node, bitshift, from, result)
