@@ -15,8 +15,8 @@ Hamster
 
 Efficient, immutable, and thread-safe collection classes for Ruby.
 
-Hamster provides 6 [Persistent Data
-Structures][PDS]: [`Hash`][HASH-DOC], [`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`SortedSet`][SORTED-SET-DOC], [`List`][LIST-DOC], and [`Deque`][DEQUE-DOC] (which works as an immutable queue or stack).
+Hamster provides 7 [Persistent Data
+Structures][PDS]: [`Hash`][HASH-DOC], [`OrderedMap`][ORDERED-MAP-DOC], [`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`SortedSet`][SORTED-SET-DOC], [`List`][LIST-DOC], and [`Deque`][DEQUE-DOC] (which works as an immutable queue or stack).
 
 Hamster collections are **immutable**. Whenever you modify a Hamster
 collection, the original is preserved and a modified copy is returned. This
@@ -41,6 +41,7 @@ process "infinitely large" lists.
 
 [PDS]: http://en.wikipedia.org/wiki/Persistent_data_structure
 [HASH-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Hash
+[ORDERED-MAP-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/OrderedMap
 [SET-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Set
 [VECTOR-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Vector
 [LIST-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/List
@@ -61,6 +62,7 @@ Or if you prefer to only pull in certain collection types:
 
 ``` ruby
 require "hamster/hash"
+require "hamster/ordered_map"
 require "hamster/vector"
 require "hamster/set"
 require "hamster/sorted_set"
@@ -120,6 +122,30 @@ counters.put(:odds, &:next)         # => {:odds => 1, :evens => 0}
 ```
 
 This is just the beginning; see the [API documentation][HASH-DOC] for details on all `Hash` methods.
+
+
+<h2>OrderedMap <span style="font-size:0.7em">(<a href="http://rubydoc.info/github/hamstergem/hamster/master/Hamster/OrderedMap">API Documentation</a>)</span></h2>
+
+An `OrderedMap` has the same immutable mapping behavior as `Hash`, but retains key insertion order. Updating an existing key leaves its position unchanged. Deleting a key and inserting it again moves it to the end.
+
+``` ruby
+config = Hamster::OrderedMap[name: "server", retries: 3, timeout: 10]
+updated = config.put(:retries, 5).put(:region, "cn")
+updated.keys # => Hamster::Vector[:name, :retries, :timeout, :region]
+
+cycle = config.delete(:timeout).put(:timeout, 30)
+cycle.keys    # => Hamster::Vector[:name, :retries, :timeout]
+cycle.to_a    # => [[:name, "server"], [:retries, 3], [:timeout, 30]]
+```
+
+When merging, keys already in the receiver keep their old positions. New keys are appended in the order yielded by the argument. Without a block, values from the argument win on conflicting keys; with a block, its return value wins.
+
+``` ruby
+config.merge(Hamster::OrderedMap[retries: 8, region: "cn"]).to_a
+# => [[:name, "server"], [:retries, 8], [:timeout, 10], [:region, "cn"]]
+```
+
+Deleted slots are kept sparsely so normal updates do not rebuild the key array. Persistent old versions remain enumerable. After enough deletions, the next update compacts the sparse order index and subsequent additions continue from the end.
 
 
 <h2>Vector <span style="font-size:0.7em">(<a href="http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Vector">API Documentation</a>)</span></h2>

@@ -55,6 +55,15 @@ describe Hamster do
         expect(Hamster.from(input)).to eql(expected_result)
       end
     end
+
+    it "preserves ordered maps recursively" do
+      input = Hamster::OrderedMap[[["a", Hamster::OrderedMap[[["b", 1]]]]]]
+      result = Hamster.from(input)
+
+      expect(result).to eql(input)
+      expect(result.class).to be(Hamster::OrderedMap)
+      expect(result["a"].class).to be(Hamster::OrderedMap)
+    end
   end
 
   describe ".to_ruby" do
@@ -106,6 +115,14 @@ describe Hamster do
           "i" => {"j" => {}, "k" => Set.new([[], {}])} }
         expect(Hamster.to_ruby(input)).to eql(expected_result)
       end
+    end
+
+    it "converts ordered maps to ordered Ruby hashes" do
+      input = Hamster::OrderedMap[[["b", 2], ["a", 1]]]
+      result = Hamster.to_ruby(input)
+
+      expect(result).to eq("b" => 2, "a" => 1)
+      expect(result.to_a).to eq([["b", 2], ["a", 1]])
     end
   end
 end

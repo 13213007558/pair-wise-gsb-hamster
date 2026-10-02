@@ -1,6 +1,7 @@
 require "set"
 require "sorted_set"
 require "hamster/hash"
+require "hamster/ordered_map"
 require "hamster/set"
 require "hamster/vector"
 require "hamster/sorted_set"
@@ -27,6 +28,8 @@ module Hamster
       when ::Hash
         res = obj.map { |key, value| [from(key), from(value)] }
         Hamster::Hash.new(res)
+      when Hamster::OrderedMap
+        Hamster::OrderedMap.new(obj.map { |key, value| [from(key), from(value)] })
       when Hamster::Hash
         obj.map { |key, value| [from(key), from(value)] }
       when ::Struct
@@ -61,6 +64,8 @@ module Hamster
     # @return [::Hash, ::Array, ::Set, ::SortedSet, Object]
     def to_ruby(obj)
       case obj
+      when Hamster::OrderedMap
+        obj.each_with_object({}) { |keyval, hash| hash[to_ruby(keyval[0])] = to_ruby(keyval[1]) }
       when Hamster::Hash, ::Hash
         obj.each_with_object({}) { |keyval, hash| hash[to_ruby(keyval[0])] = to_ruby(keyval[1]) }
       when Hamster::Vector, ::Array
