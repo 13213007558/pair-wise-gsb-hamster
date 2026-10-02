@@ -255,6 +255,61 @@ module Hamster
       end
     end
 
+    # Return a `List` which is realized by transforming each item into a `List`,
+    # and fairly interleaving the resulting lists. Unlike {#flat_map}, which
+    # appends each sublist after the previous one (so that an infinite sublist
+    # would prevent any subsequent item from ever being reached), this method
+    # alternates between the sublists. Every item of every sublist therefore
+    # appears at a finite position, even when this list or any of the sublists
+    # is infinite.
+    #
+    # @example
+    #   naturals = Hamster.iterate(0, &:next)
+    #   naturals.fair_flat_map { |x| Hamster::List[x, x].take(x + 1) }.take(6)
+    #   # => Hamster::List[0, 1, 1, 2, 2, 2]
+    #
+    # @return [List]
+    def fair_flat_map(&block)
+      return enum_for(:fair_flat_map) unless block_given?
+      LazyList.new do
+        next self if empty?
+        head_list = yield(head)
+        head_list = List.from_enum(head_list) unless head_list.is_a?(List)
+        head_list.fair_interleave(tail.fair_flat_map(&block))
+      end
+    end
+
+    # Return a `List` of all pairs of one item from this list and one item from
+    # `other`, as 2-element `Array`s. The pairs are ordered fairly: unlike a
+    # depth-first enumeration (which would keep using the first item of this
+    # list forever when `other` is infinite), every combination of finite
+    # indices appears at a finite position, even when both lists are infinite.
+    #
+    # @example
+    #   naturals = Hamster.iterate(0, &:next)
+    #   naturals.fair_product(naturals).take(5)
+    #   # => Hamster::List[[0, 0], [1, 0], [0, 1], [2, 0], [0, 2]]
+    #
+    # @param other [Enumerable]
+    # @return [List]
+    def fair_product(other)
+      other = List.from_enum(other) unless other.is_a?(List)
+      fair_flat_map { |x| other.map { |y| [x, y] } }
+    end
+
+    # @private
+    # Fairly interleave this `List` with `other`, alternating items from each.
+    # Unlike {#append}, every item of both lists appears at a finite position,
+    # even if both are infinite. Once either list is exhausted, the remainder
+    # of the other follows.
+    def fair_interleave(other)
+      LazyList.new do
+        next other if empty?
+        Cons.new(head, other.fair_interleave(tail))
+      end
+    end
+    protected :fair_interleave
+
     # Return a `List` which contains all the items for which the given block
     # returns true.
     #
