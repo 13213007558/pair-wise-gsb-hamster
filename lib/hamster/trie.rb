@@ -10,11 +10,14 @@ module Hamster
     # Returns the number of key-value pairs in the trie.
     attr_reader :size
 
-    def initialize(significant_bits, size = 0, entries = [], children = [])
+    def initialize(significant_bits, size = 0, entries = [], children = [], owner = nil)
       @significant_bits = significant_bits
       @entries = entries
       @children = children
       @size = size
+      @node_owner = owner
+      @entries_owner = nil
+      @children_owner = nil
     end
 
     # Returns <tt>true</tt> if the trie contains no key-value pairs.
@@ -179,6 +182,109 @@ module Hamster
       self
     end
 
+    def mutable_put(key, value, owner)
+      index = index_for(key)
+      entry = @entries[index]
+
+      if !entry
+        @entries = mutable_entries(owner)
+        @children = mutable_children(owner)
+        key = duplicate_string_key(key)
+        @entries[index] = [key, value].freeze
+        @size += 1
+      elsif entry[0].eql?(key)
+        unless entry[1].equal?(value)
+          @entries = mutable_entries(owner)
+          key = duplicate_string_key(key)
+          @entries[index] = [key, value].freeze
+        end
+      else
+        child = @children[index]
+        if child
+          unless child.instance_variable_get(:@node_owner).equal?(owner)
+            @children = mutable_children(owner)
+            child = child.mutable_clone(owner)
+            @children[index] = child
+          end
+          old_child_size = child.size
+          child.mutable_put(key, value, owner)
+          @size += child.size - old_child_size
+        else
+          @children = mutable_children(owner)
+          child = Trie.new(@significant_bits + 5, 0, [], [], owner)
+          @children[index] = child.mutable_put(key, value, owner)
+          @size += 1
+        end
+      end
+      self
+    end
+
+    def mutable_delete(key, owner)
+      index = index_for(key)
+      entry = @entries[index]
+
+      if entry && entry[0].eql?(key)
+        return nil if @size == 1
+
+        @entries = mutable_entries(owner)
+        child = @children[index]
+        if child
+          unless child.instance_variable_get(:@node_owner).equal?(owner)
+            @children = mutable_children(owner)
+            child = child.mutable_clone(owner)
+            @children[index] = child
+          end
+          replacement = child.delete_last_entry
+          @entries[index] = replacement
+          remaining_child = child.mutable_delete(replacement[0], owner)
+          @children[index] = remaining_child
+        else
+          @entries[index] = nil
+        end
+        @size -= 1
+        self
+      else
+        child = @children[index]
+        return self unless child
+
+        unless child.instance_variable_get(:@node_owner).equal?(owner)
+          @children = mutable_children(owner)
+          child = child.mutable_clone(owner)
+          @children[index] = child
+        end
+
+        old_child_size = child.size
+        replacement = child.mutable_delete(key, owner)
+        @children[index] = replacement
+        size_change = old_child_size - (replacement ? replacement.size : 0)
+        return self if size_change == 0
+        @size -= size_change
+        self
+      end
+    end
+
+    def mutable_clone(owner)
+      clone = dup
+      clone.instance_variable_set(:@entries, @entries.dup)
+      clone.instance_variable_set(:@children, @children.dup)
+      clone.instance_variable_set(:@node_owner, owner)
+      clone.instance_variable_set(:@entries_owner, owner)
+      clone.instance_variable_set(:@children_owner, owner)
+      clone
+    end
+
+    def delete_last_entry
+      child = @children.reverse.find { |candidate| candidate }
+      child ? child.delete_last_entry : @entries.reverse.find { |candidate| candidate }
+    end
+
+    def freeze_structure
+      @children.each { |child| child.freeze_structure if child }
+      @entries.freeze
+      @children.freeze
+      freeze
+    end
+
     # Retrieves the entry corresponding to the given key. If not found, returns <tt>nil</tt>.
     def get(key)
       index = index_for(key)
@@ -326,6 +432,22 @@ module Hamster
 
     def index_for(key)
       (key.hash.abs >> @significant_bits) & 31
+    end
+
+    def mutable_entries(owner)
+      owned = @entries_owner.equal?(owner)
+      @entries_owner = owner
+      owned ? @entries : @entries.dup
+    end
+
+    def mutable_children(owner)
+      owned = @children_owner.equal?(owner)
+      @children_owner = owner
+      owned ? @children : @children.dup
+    end
+
+    def duplicate_string_key(key)
+      key.is_a?(String) && !key.frozen? ? key.dup.freeze : key
     end
 
     def copy_size(copy)

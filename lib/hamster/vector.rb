@@ -1,4 +1,5 @@
 require "hamster/immutable"
+require "hamster/editor"
 require "hamster/enumerable"
 require "hamster/hash"
 require "hamster/associable"
@@ -94,6 +95,299 @@ module Hamster
           levels += 1
         end
         @root, @size, @levels = root.freeze, size, levels
+      end
+    end
+
+    # Open a short-lived editor for many vector updates. With a block, the
+    # block's result is automatically frozen into a normal immutable {Vector}.
+    # Without a block, the returned editor is thread-confined and must be
+    # closed manually.
+    #
+    # @example
+    #   result = vector.edit do |editor|
+    #     10_000.times { |index| editor.push(index) }
+    #   end
+    #
+    # @yield [Vector::Editor]
+    # @return [Vector, Vector::Editor]
+    def edit
+      editor = self.class::Editor.new(self)
+      return editor unless block_given?
+
+      begin
+        yield editor
+        editor.finish
+      rescue Exception
+        editor.abort
+        raise
+      end
+    end
+    alias :editor :edit
+    alias :transient :edit
+
+    class Editor < Hamster::Editor
+      def initialize(vector)
+        super()
+        @vector_class = vector.class
+        @root = vector.instance_variable_get(:@root)
+        @size = vector.size
+        @levels = vector.instance_variable_get(:@levels)
+        @owner = Object.new
+        @owned = {}
+      end
+
+      def size
+        check!
+        @size
+      end
+      alias :length :size
+
+      def empty?
+        check!
+        @size == 0
+      end
+
+      def get(index)
+        check!
+        return nil if @size == 0
+        index += @size if index < 0
+        return nil if index >= @size || index < 0
+        leaf_node_for(@root, @levels * 5, index)[index & 31]
+      end
+      alias :[] :get
+      alias :at :get
+
+      def fetch(index, default = (missing_default = true))
+        check!
+        if index >= -@size && index < @size
+          get(index)
+        elsif block_given?
+          yield(index)
+        elsif !missing_default
+          default
+        else
+          raise IndexError, "index #{index} outside of vector bounds"
+        end
+      end
+
+      def each(&block)
+        check!
+        return enum_for(:each) unless block_given?
+        traverse_depth_first(@root, @levels, &block)
+        self
+      end
+
+      def put(index, item = yield(get(index)))
+        check!
+        raise IndexError, "index #{index} outside of vector bounds" if index < -@size
+        index += @size if index < 0
+        if index > @size
+          insert_padding(index)
+          set_index(index, item)
+        else
+          set_index(index, item)
+        end
+        self
+      end
+      alias :set :put
+      alias :[]= :put
+
+      def add(item)
+        check!
+        set_index(@size, item)
+        self
+      end
+      alias :<< :add
+      alias :push :add
+
+      def delete_at(index)
+        check!
+        replace_structurally(working_vector.delete_at(normalize_existing_index(index)))
+        self
+      end
+
+      def pop
+        check!
+        replace_structurally(working_vector.pop)
+        self
+      end
+
+      def insert(index, *items)
+        check!
+        replace_structurally(working_vector.insert(normalize_insert_index(index), *items))
+        self
+      end
+
+      def unshift(item)
+        check!
+        replace_structurally(working_vector.unshift(item))
+        self
+      end
+
+      def shift
+        check!
+        replace_structurally(working_vector.shift)
+        self
+      end
+
+      def concat(other)
+        check!
+        replace_structurally(working_vector.concat(other))
+        self
+      end
+      alias :merge :concat
+
+      def fill(object, index = 0, length = nil)
+        check!
+        replace_structurally(working_vector.fill(object, index, length))
+        self
+      end
+
+      def clear
+        check!
+        @root = []
+        @size = 0
+        @levels = 0
+        @owned = {}
+        mark_owned(@root)
+        self
+      end
+
+      def to_a
+        check!
+        flatten_node(@root, @levels * 5, [])
+      end
+
+      private
+
+      def set_index(index, item)
+        grow_for(index)
+        @root = mutable_path(@root, @levels * 5, index, item)
+        @size = index + 1 if index >= @size
+      end
+
+      def insert_padding(index)
+        @size.upto(index - 1) { |position| set_index(position, nil) }
+      end
+
+      def grow_for(index)
+        while index >= (1 << (5 * (@levels + 1)))
+          @root = [@root]
+          @levels += 1
+          mark_owned(@root)
+        end
+      end
+
+      def mutable_path(node, bitshift, index, item)
+        slot = (index >> bitshift) & 31
+        if bitshift == 0
+          mutable_node(node).tap { |copy| copy[slot] = item }
+        else
+          child = node[slot]
+          new_child = mutable_path(child || [], bitshift - 5, index, item)
+          if owned_here?(node)
+            node[slot] = new_child
+            node
+          else
+            mutable_node(node).tap { |copy| copy[slot] = new_child }
+          end
+        end
+      end
+
+      def mutable_node(node)
+        return node if owned_here?(node) && !node.frozen?
+        node.dup.tap { |copy| mark_owned(copy) }
+      end
+
+      def owned_here?(node)
+        @owned.key?(node.object_id) && @owned[node.object_id].equal?(node)
+      end
+
+      def mark_owned(node)
+        @owned[node.object_id] = node
+      end
+
+      def working_vector
+        @vector_class.alloc(@root, @size, @levels)
+      end
+
+      def replace_structurally(vector)
+        existing_node_ids = current_node_ids
+        @root = vector.instance_variable_get(:@root)
+        @size = vector.size
+        @levels = vector.instance_variable_get(:@levels)
+        register_tree(@root, @levels, existing_node_ids)
+      end
+
+      def current_node_ids
+        node_ids = {}
+        collect_node_ids(@root, @levels, node_ids)
+        node_ids
+      end
+
+      def collect_node_ids(node, levels, node_ids)
+        node_ids[node.object_id] = node
+        return if levels == 0
+        node.each { |child| collect_node_ids(child, levels - 1, node_ids) if child }
+      end
+
+      def register_tree(node, levels, existing_node_ids)
+        if !node.frozen? && (owned_here?(node) || !existing_node_ids.key?(node.object_id))
+          mark_owned(node)
+        end
+        return if levels == 0
+        node.each { |child| register_tree(child, levels - 1, existing_node_ids) if child }
+      end
+
+      def normalize_existing_index(index)
+        raise IndexError if index < -@size || index >= @size
+        index < 0 ? index + @size : index
+      end
+
+      def normalize_insert_index(index)
+        raise IndexError if index < -@size
+        index < 0 ? index + @size : index
+      end
+
+      def commit
+        freeze_nodes(@root, @levels)
+        @vector_class.alloc(@root, @size, @levels).__send__(:immutable!)
+      end
+
+      def freeze_nodes(node, levels)
+        node.freeze
+        return if levels == 0
+        node.each { |child| freeze_nodes(child, levels - 1) if child }
+      end
+
+      def discard_work
+        @root = nil
+        @owned = nil
+      end
+
+      def leaf_node_for(node, bitshift, index)
+        while bitshift > 0
+          node = node[(index >> bitshift) & 31]
+          bitshift -= 5
+        end
+        node
+      end
+
+      def traverse_depth_first(node, level, &block)
+        return node.each(&block) if level == 0
+        node.each { |child| traverse_depth_first(child, level - 1, &block) }
+      end
+
+      def flatten_node(node, bitshift, result)
+        if bitshift == 0
+          result.concat(node)
+        elsif bitshift == 5
+          node.each { |child| result.concat(child) }
+        else
+          bitshift -= 5
+          node.each { |child| flatten_node(child, bitshift, result) }
+        end
+        result
       end
     end
 

@@ -1,4 +1,5 @@
 require "hamster/immutable"
+require "hamster/editor"
 require "hamster/undefined"
 require "hamster/enumerable"
 require "hamster/trie"
@@ -103,6 +104,131 @@ module Hamster
     def initialize(pairs = nil, &block)
       @trie = pairs ? Trie[pairs] : EmptyTrie
       @default = block
+    end
+
+    # Open a short-lived editor for many hash updates. With a block, the block's
+    # result is automatically frozen into a normal immutable {Hash}. Without a
+    # block, the returned editor is thread-confined and must be closed manually.
+    #
+    # @example
+    #   result = hash.edit do |editor|
+    #     10_000.times { |index| editor.put(index, index) }
+    #   end
+    #
+    # @yield [Hash::Editor]
+    # @return [Hash, Hash::Editor]
+    def edit
+      editor = self.class::Editor.new(self)
+      return editor unless block_given?
+
+      begin
+        yield editor
+        editor.finish
+      rescue Exception
+        editor.abort
+        raise
+      end
+    end
+    alias :editor :edit
+    alias :transient :edit
+
+    class Editor < Hamster::Editor
+      def initialize(hash)
+        super()
+        @hash_class = hash.class
+        @default = hash.instance_variable_get(:@default)
+        @owner = Object.new
+        @trie = hash.instance_variable_get(:@trie).mutable_clone(@owner)
+      end
+
+      def size
+        check!
+        @trie.size
+      end
+      alias :length :size
+
+      def empty?
+        check!
+        @trie.empty?
+      end
+
+      def key?(key)
+        check!
+        @trie.key?(key)
+      end
+      alias :has_key? :key?
+      alias :include? :key?
+
+      def get(key)
+        check!
+        entry = @trie.get(key)
+        entry ? entry[1] : @default && @default.call(key)
+      end
+      alias :[] :get
+
+      def fetch(key, default = Undefined)
+        check!
+        entry = @trie.get(key)
+        if entry
+          entry[1]
+        elsif block_given?
+          yield(key)
+        elsif default != Undefined
+          default
+        else
+          raise KeyError, "key not found: #{key.inspect}"
+        end
+      end
+
+      def each(&block)
+        check!
+        return enum_for(:each) unless block_given?
+        @trie.each(&block)
+        self
+      end
+
+      def put(key, value = yield(get(key)))
+        check!
+        @trie.mutable_put(key, value, @owner)
+        self
+      end
+      alias :[]= :put
+      alias :store :put
+      alias :set :put
+
+      def delete(key)
+        check!
+        @trie = @trie.mutable_delete(key, @owner) || Trie.new(0, 0, [], [], @owner)
+        self
+      end
+
+      def merge!(other)
+        check!
+        other.each { |key, value| @trie.mutable_put(key, value, @owner) }
+        self
+      end
+      alias :update :merge!
+
+      def clear
+        check!
+        @trie = Trie.new(0, 0, [], [], @owner)
+        self
+      end
+
+      private
+
+      def commit
+        @trie.freeze_structure
+        @hash_class.alloc(@trie, @default).__send__(:immutable!)
+      end
+
+      def discard_work
+        @trie = nil
+      end
+
+      def check!
+        super
+      end
     end
 
     # Return the default block if there is one. Otherwise, return `nil`.
