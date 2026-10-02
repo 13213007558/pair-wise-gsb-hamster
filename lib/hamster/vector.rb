@@ -80,6 +80,22 @@ module Hamster
         obj.instance_variable_set(:@levels, levels)
         obj
       end
+
+      # Return a new `Vector` built by concatenating all the given vectors
+      # (and/or other collections) together, in order. This is equivalent to
+      # starting with an empty vector and repeatedly using {#concat}, but
+      # complete internal blocks of the source vectors are reused rather than
+      # being copied element by element.
+      #
+      # @example
+      #   Hamster::Vector.concat_many(Hamster::Vector[1, 2], [3, 4])
+      #   # => Hamster::Vector[1, 2, 3, 4]
+      #
+      # @param vectors [Array] The collections to concatenate
+      # @return [Vector]
+      def concat_many(*vectors)
+        empty.concat_many(*vectors)
+      end
     end
 
     def initialize(items=[].freeze)
@@ -602,6 +618,69 @@ module Hamster
       replace_suffix(@size, other)
     end
     alias :concat :+
+
+    # Return a new `Vector` built by concatenating this vector with any
+    # number of other vectors or collections, in order. Unlike repeatedly
+    # calling {#concat}, complete internal blocks of the source vectors are
+    # reused directly (without copying their elements), so concatenating
+    # many batches is cheap and the resulting trie stays balanced: its depth
+    # depends on the total number of elements, not on the number of batches.
+    #
+    # A single `Array` of vectors may also be passed, in which case each of
+    # those vectors is concatenated in order.
+    #
+    # @example
+    #   Hamster::Vector[1, 2].concat_many(Hamster::Vector[3, 4], [5, 6])
+    #   # => Hamster::Vector[1, 2, 3, 4, 5, 6]
+    #
+    # @param others [Array] The vectors/collections to concatenate
+    # @return [Vector]
+    def concat_many(*others)
+      if others.size == 1 && others[0].is_a?(Array) &&
+         others[0].all? { |item| item.is_a?(Vector) }
+        others = others[0]
+      end
+
+      segments = []
+      segments << [self, 0, @size] if @size > 0
+      others.each do |other|
+        other = self.class.new(other.to_a) unless other.is_a?(Vector)
+        segments << [other, 0, other.size] if other.size > 0
+      end
+
+      return self if segments.empty?
+      return self if segments.size == 1 && segments[0][0].equal?(self)
+      build_from_segments(segments)
+    end
+
+    # Split this vector into two new vectors at the given `index`: the first
+    # contains all elements before `index`, the second contains `index`
+    # and everything after it. If `index` is negative, it counts back from
+    # the end of the vector.
+    #
+    # Complete internal blocks are shared with the original vector wherever
+    # possible, so splitting does not copy the whole trie; only the nodes
+    # along the boundary are rebuilt.
+    #
+    # @example
+    #   Hamster::Vector[1, 2, 3, 4].split_at(2)
+    #   # => [Hamster::Vector[1, 2], Hamster::Vector[3, 4]]
+    #   Hamster::Vector[1, 2, 3, 4].split_at(-1)
+    #   # => [Hamster::Vector[1, 2, 3], Hamster::Vector[4]]
+    #
+    # @param index [Integer] The index to split at. May be negative.
+    # @return [Array(Vector, Vector)]
+    # @raise [IndexError] if index is out of range
+    def split_at(index)
+      raise IndexError, "index #{index} outside of vector bounds" if index < -@size || index > @size
+      index += @size if index < 0
+      return [self.class.empty, self] if index == 0
+      return [self, self.class.empty] if index == @size
+
+      left_root, left_levels = split_left_root(index)
+      right = build_from_segments([[self, index, @size - index]])
+      [self.class.alloc(left_root.freeze, index, left_levels), right]
+    end
 
     # Combine two vectors by "zipping" them together. `others` should be arrays
     # and/or vectors. The corresponding elements from this `Vector` and each of
@@ -1503,6 +1582,170 @@ module Hamster
         else
           raise "Shouldn't happen"
         end
+      end
+    end
+
+    # Build a new `Vector` from the concatenation of the given segments.
+    # Each segment is a triple of `[vector, from, length]`, selecting
+    # `length` elements starting at `from` from `vector`. Complete
+    # internal blocks (leaves and whole internal nodes) of the source vectors
+    # are reused directly whenever segment boundaries are aligned with them,
+    # instead of copying all elements into new arrays.
+    #
+    # @private
+    def build_from_segments(segments)
+      total = segments.reduce(0) { |sum, segment| sum + segment[2] }
+      return self.class.empty if total == 0
+
+      # Assemble the leaf level. Whole source leaves are shared whenever the
+      # current output position falls on a leaf boundary; otherwise elements
+      # are gathered into a pending leaf until it fills up.
+      leaves = []
+      pending = nil
+      segments.each do |vector, from, length|
+        each_leaf_in_range(vector, from, length) do |leaf|
+          if pending.nil?
+            if leaf.size == BLOCK_SIZE
+              leaves << leaf
+            else
+              pending = leaf.dup
+            end
+          else
+            need = BLOCK_SIZE - pending.size
+            pending.concat(leaf.first(need))
+            if pending.size == BLOCK_SIZE
+              leaves << pending
+              pending = nil
+            end
+            pending = leaf[need..-1] if leaf.size > need
+          end
+        end
+      end
+      leaves << pending if pending
+
+      return self.class.alloc(leaves[0].freeze, total, 0) if leaves.size == 1
+
+      # Build the upper levels bottom-up. Wherever a source vector is aligned
+      # with the output at the granularity of the level being built, its whole
+      # internal nodes at that level are reused instead of being rebuilt.
+      levels = 1
+      nodes = leaves
+      while nodes.size > BLOCK_SIZE
+        span = BLOCK_SIZE << (BITS_PER_LEVEL * levels)
+        runs = []
+        offset = 0
+        segments.each do |vector, from, length|
+          if offset % span == 0 && from % span == 0 &&
+             levels <= vector.instance_variable_get(:@levels)
+            first = from / span
+            count = (from + length) / span - first
+            if count > 0
+              runs << [offset / span, nodes_at_level(vector, levels)[first, count]]
+            end
+          end
+          offset += length
+        end
+        nodes = group_into_parent_nodes(nodes, runs)
+        levels += 1
+      end
+
+      self.class.alloc(nodes.freeze, total, levels)
+    end
+
+    # Yield each leaf array of `vector` covering the `length` elements
+    # starting at `from`. Whole internal leaves are yielded directly (shared,
+    # never mutated); partial leaves at the edges are yielded as new arrays.
+    #
+    # @private
+    def each_leaf_in_range(vector, from, length)
+      return if length <= 0
+      root = vector.instance_variable_get(:@root)
+      bitshift = vector.instance_variable_get(:@levels) * BITS_PER_LEVEL
+      first_leaf = from >> BITS_PER_LEVEL
+      last_leaf = (from + length - 1) >> BITS_PER_LEVEL
+      first_leaf.upto(last_leaf) do |leaf_index|
+        leaf = leaf_node_for(root, bitshift, leaf_index << BITS_PER_LEVEL)
+        start = leaf_index == first_leaf ? (from & INDEX_MASK) : 0
+        stop  = leaf_index == last_leaf  ? ((from + length - 1) & INDEX_MASK) : INDEX_MASK
+        if start == 0 && stop == INDEX_MASK
+          yield leaf
+        else
+          yield leaf[start..stop]
+        end
+      end
+    end
+
+    # Return all of `vector`'s internal nodes at the given `level` (leaves
+    # are level 0, the root is level `@levels`), in order.
+    #
+    # @private
+    def nodes_at_level(vector, level)
+      collect_nodes_at_level(vector.instance_variable_get(:@root),
+                             vector.instance_variable_get(:@levels),
+                             level, [])
+    end
+
+    # @private
+    def collect_nodes_at_level(node, node_level, target_level, result)
+      if node_level == target_level
+        result << node
+      else
+        node.each { |child| collect_nodes_at_level(child, node_level - 1, target_level, result) }
+      end
+      result
+    end
+
+    # Group `nodes` into parent nodes of `BLOCK_SIZE` children each (the
+    # last one may be smaller). `runs` is a sorted list of
+    # `[parent_index, shared_nodes]` pairs identifying ranges which can be
+    # filled with existing internal nodes instead of new arrays.
+    #
+    # @private
+    def group_into_parent_nodes(nodes, runs)
+      result = []
+      index = 0
+      runs.each do |parent_index, shared_nodes|
+        stop = parent_index * BLOCK_SIZE
+        while index < stop
+          result << nodes[index, BLOCK_SIZE].freeze
+          index += BLOCK_SIZE
+        end
+        result.concat(shared_nodes)
+        index = stop + shared_nodes.size * BLOCK_SIZE
+      end
+      while index < nodes.size
+        result << nodes[index, BLOCK_SIZE].freeze
+        index += BLOCK_SIZE
+      end
+      result
+    end
+
+    # Build the root of a new trie holding only the first `index` elements
+    # of this vector. All complete subtrees left of the boundary are shared
+    # with this vector; only the nodes along the boundary path are copied.
+    # Returns the new root and its number of levels.
+    #
+    # @private
+    def split_left_root(index)
+      levels = @levels
+      root = take_prefix_node(@root, levels * BITS_PER_LEVEL, index)
+      while root.size == 1 && levels > 0
+        root = root[0]
+        levels -= 1
+      end
+      [root, levels]
+    end
+
+    # @private
+    def take_prefix_node(node, bitshift, index)
+      slot = (index >> bitshift) & INDEX_MASK
+      if bitshift == 0
+        node[0...slot]
+      else
+        result = node[0...slot]
+        prefix = take_prefix_node(node[slot], bitshift - BITS_PER_LEVEL, index)
+        result << prefix unless prefix.empty?
+        result
       end
     end
   end
