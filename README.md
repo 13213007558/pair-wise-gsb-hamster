@@ -15,8 +15,8 @@ Hamster
 
 Efficient, immutable, and thread-safe collection classes for Ruby.
 
-Hamster provides 6 [Persistent Data
-Structures][PDS]: [`Hash`][HASH-DOC], [`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`SortedSet`][SORTED-SET-DOC], [`List`][LIST-DOC], and [`Deque`][DEQUE-DOC] (which works as an immutable queue or stack).
+Hamster provides 7 [Persistent Data
+Structures][PDS]: [`Hash`][HASH-DOC], [`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`SortedSet`][SORTED-SET-DOC], [`List`][LIST-DOC], [`Deque`][DEQUE-DOC] (which works as an immutable queue or stack), and [`PriorityQueue`][PRIORITY-QUEUE-DOC].
 
 Hamster collections are **immutable**. Whenever you modify a Hamster
 collection, the original is preserved and a modified copy is returned. This
@@ -46,6 +46,7 @@ process "infinitely large" lists.
 [LIST-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/List
 [SORTED-SET-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/SortedSet
 [DEQUE-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Deque
+[PRIORITY-QUEUE-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/PriorityQueue
 
 
 Using
@@ -338,6 +339,34 @@ deque.unshift(:a)               # => Hamster::Deque[:a, 1, 2, 3]
 ```
 
 Of course, you can do the same thing with a `Vector`, but a `Deque` is more efficient. See the API documentation for details on all [`Deque`][DEQUE-DOC] methods.
+
+
+<h2>PriorityQueue <span style="font-size:0.7em">(<a href="http://rubydoc.info/github/hamstergem/hamster/master/Hamster/PriorityQueue">API Documentation</a>)</span></h2>
+
+A `PriorityQueue` is a meldable priority queue, useful for search algorithms which
+need to keep old versions around in order to explore other branches. Items are
+inserted with a priority and come out smallest-priority first, with ties broken by
+insertion order. Every `#insert` also returns a stable `Handle` which identifies
+that one insertion, and can later be used to `#decrease_priority` or `#delete`
+that entry in any derived version of the queue:
+
+``` ruby
+queue = Hamster::PriorityQueue.new
+queue, handle = queue.insert("cook dinner", 2)
+queue, _      = queue.insert("answer mail", 1)
+queue.min                          # => "answer mail"
+queue = queue.decrease_priority(handle, 0)
+queue.min                          # => "cook dinner"
+queue.pop                          # => Hamster::PriorityQueue["answer mail"]
+```
+
+Two queues can be combined with `#meld`. Since both queues keep their element
+identities, melding never duplicates entries they share. If both queues descend
+from a common ancestor and disagree about the priority of the same entry, `#meld`
+raises a `ConflictError`, unless you pass a block which resolves the conflict
+explicitly. Using a handle which does not belong to a queue version (or was already
+deleted from it) raises `UnknownHandleError` or `StaleHandleError`. See the API
+documentation for details on all [`PriorityQueue`][PRIORITY-QUEUE-DOC] methods.
 
 
 <h2>Transformations</h2>

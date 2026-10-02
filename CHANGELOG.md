@@ -1,6 +1,10 @@
 Changelog
 =========
 
+  - Unreleased
+    * [Added] Hamster::PriorityQueue, a persistent, meldable priority queue
+      with stable handles for decrease-priority and delete
+
   - 3.0.0
     * [Changed] the behavior of Hamster::Hash#values_at
     * [Added] Hamster::Hash#dig and Hamster::Enumerable#grep_v
