@@ -2,6 +2,7 @@ require "hamster/immutable"
 require "hamster/undefined"
 require "hamster/enumerable"
 require "hamster/trie"
+require "hamster/transient"
 require "hamster/set"
 require "hamster/vector"
 require "hamster/associable"
@@ -110,6 +111,43 @@ module Hamster
     # @return [Proc]
     def default_proc
       @default
+    end
+
+    # Begin a mutable, single-threaded editing session on this hash.
+    #
+    # Without a block, returns a {TransientHash} which can be updated
+    # repeatedly and must finally be sealed with
+    # {TransientHash#persistent!} to obtain an immutable {Hash} again:
+    #
+    #     t = hash.transient
+    #     1000.times { |i| t.put(i, i) }
+    #     hash2 = t.persistent!
+    #
+    # With a block, the editor is yielded and automatically sealed when the
+    # block returns; the sealed {Hash} is returned. If the block raises,
+    # the editor is invalidated so the half-finished session cannot be
+    # resumed through a retained reference:
+    #
+    #     hash2 = hash.transient do |t|
+    #       1000.times { |i| t.put(i, i) }
+    #     end
+    #
+    # In both cases, this hash (and any other persistent hash derived from
+    # it) is left unchanged: only trie nodes exclusively owned by the
+    # editing session are mutated in place; shared nodes are copied first.
+    #
+    # @yield [transient] A {TransientHash} editing session
+    # @return [TransientHash] if no block is given
+    # @return [Hash] if a block is given
+    def transient
+      editor = TransientHash.new(@trie, @default, self.class)
+      return editor unless block_given?
+      begin
+        yield editor
+        editor.persistent!
+      ensure
+        editor.invalidate!
+      end
     end
 
     # Return the number of key/value pairs in this `Hash`.

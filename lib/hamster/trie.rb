@@ -179,6 +179,77 @@ module Hamster
       self
     end
 
+    # Returns the node to use after associating the given key and value,
+    # mutating nodes in place when they are exclusively owned by the given
+    # +token+. Nodes not owned by the token (including all nodes reachable
+    # from any persistent collection) are copied before modification, so
+    # existing persistent structures are never affected.
+    #
+    # Used by Hamster::TransientHash to batch many updates without
+    # allocating new nodes for every single one.
+    #
+    # @private
+    def put_mutating(key, value, token)
+      index = index_for(key)
+      entry = @entries[index]
+
+      if !entry
+        node = editable_copy(token)
+        key = key.dup.freeze if key.is_a?(String) && !key.frozen?
+        node.set_entry(index, [key, value].freeze)
+        node.adjust_size(1)
+      elsif entry[0].eql?(key)
+        if entry[1].equal?(value)
+          return self
+        end
+        node = editable_copy(token)
+        key = key.dup.freeze if key.is_a?(String) && !key.frozen?
+        node.set_entry(index, [key, value].freeze)
+      else
+        child = @children[index]
+        if child
+          old_child_size = child.size
+          new_child = child.put_mutating(key, value, token)
+          delta = new_child.size - old_child_size
+          if new_child.equal?(child) && delta == 0
+            return self
+          end
+          node = editable_copy(token)
+          node.set_child(index, new_child)
+          node.adjust_size(delta) if delta != 0
+        else
+          node = editable_copy(token)
+          node.set_child(index, Trie.new(@significant_bits + 5).put!(key, value))
+          node.adjust_size(1)
+        end
+      end
+      node
+    end
+
+    # Returns the node to use after removing the given key, mutating nodes in
+    # place when they are exclusively owned by the given token (see
+    # put_mutating). Returns nil if the trie became empty.
+    #
+    # @private
+    def delete_mutating(key, token)
+      index = index_for(key)
+      entry = @entries[index]
+      if entry && entry[0].eql?(key)
+        delete_at_mutating(token, index)
+      else
+        child = @children[index]
+        return self unless child
+        old_child_size = child.size
+        new_child = child.delete_mutating(key, token)
+        new_child_size = new_child ? new_child.size : 0
+        delta = new_child_size - old_child_size
+        return self if delta == 0
+        node = editable_copy(token)
+        node.set_child(index, new_child)
+        node.adjust_size(delta)
+        node
+      end
+    end
     # Retrieves the entry corresponding to the given key. If not found, returns <tt>nil</tt>.
     def get(key)
       index = index_for(key)
@@ -320,6 +391,58 @@ module Hamster
         end
         Trie.new(@significant_bits, @size - 1, entries, children || @children)
       end
+    end
+
+    # In-place (ownership-aware) variant of delete_at. Returns the node to
+    # use, or nil if the trie became empty.
+    #
+    # @private
+    def delete_at_mutating(token, index = @entries.index { |e| e })
+      yield(@entries[index]) if block_given?
+      return nil if @size <= 1
+      node = editable_copy(token)
+      child = @children[index]
+      if child
+        node.set_child(index, child.delete_at_mutating(token) do |entry|
+          node.set_entry(index, entry)
+        end)
+      else
+        node.set_entry(index, nil)
+      end
+      node.adjust_size(-1)
+      node
+    end
+
+    # Returns self if this node is exclusively owned by the given token,
+    # otherwise returns a shallow copy of this node which is owned by the
+    # token. Owned nodes are only reachable from the owning transient
+    # editing session, so they can safely be mutated in place.
+    #
+    # @private
+    def editable_copy(token)
+      if @owner.equal?(token)
+        self
+      else
+        copy = Trie.new(@significant_bits, @size, @entries.dup, @children.dup)
+        copy.owner = token
+        copy
+      end
+    end
+
+    protected
+
+    attr_writer :owner
+
+    def set_entry(index, entry)
+      @entries[index] = entry
+    end
+
+    def set_child(index, child)
+      @children[index] = child
+    end
+
+    def adjust_size(delta)
+      @size += delta
     end
 
     private

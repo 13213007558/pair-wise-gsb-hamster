@@ -1,6 +1,12 @@
 Changelog
 =========
 
+  - Unreleased
+    * [Added] Hamster::Hash#transient and Hamster::Vector#transient, returning
+      single-threaded transient editors (Hamster::TransientHash and
+      Hamster::TransientVector) which mutate exclusively-owned nodes in place
+      and seal back into immutable collections with #persistent!
+
   - 3.0.0
     * [Changed] the behavior of Hamster::Hash#values_at
     * [Added] Hamster::Hash#dig and Hamster::Enumerable#grep_v
