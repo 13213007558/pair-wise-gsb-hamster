@@ -16,7 +16,7 @@ Hamster
 Efficient, immutable, and thread-safe collection classes for Ruby.
 
 Hamster provides 6 [Persistent Data
-Structures][PDS]: [`Hash`][HASH-DOC], [`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`SortedSet`][SORTED-SET-DOC], [`List`][LIST-DOC], and [`Deque`][DEQUE-DOC] (which works as an immutable queue or stack).
+Structures][PDS]: [`Hash`][HASH-DOC], [`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`SortedSet`][SORTED-SET-DOC], [`List`][LIST-DOC], [`Deque`][DEQUE-DOC] (which works as an immutable queue or stack), and a measure-annotated [`MeasuredDeque`](#measureddedque-measured-double-ended-queue) for splits by accumulated measure.
 
 Hamster collections are **immutable**. Whenever you modify a Hamster
 collection, the original is preserved and a modified copy is returned. This
@@ -338,6 +338,34 @@ deque.unshift(:a)               # => Hamster::Deque[:a, 1, 2, 3]
 ```
 
 Of course, you can do the same thing with a `Vector`, but a `Deque` is more efficient. See the API documentation for details on all [`Deque`][DEQUE-DOC] methods.
+
+
+<h2>MeasuredDeque <span style="font-size:0.7em">(measured double-ended queue)</span></h2>
+
+A `MeasuredDeque` is a `Deque` where every element carries a *measure*. You give it an identity element and an associative combining block (a monoid), and the deque keeps the aggregate measure of every internal subtree. It supports adding and removing at both ends and concatenation like a `Deque`, plus locating an element by its *accumulated measure* in logarithmic time, without scanning the whole collection.
+
+The combining operation only needs to be associative, not commutative. String concatenation works, which is handy for locating a variable-length data chunk by cumulative byte offset:
+
+``` ruby
+chunks = Hamster::MeasuredDeque.new("", ["ab", "cd", "ef"]) { |a, b| a + b }
+chunks.measure                          # => "abcdef"
+
+offset = 3
+before, chunk, after = chunks.split { |total| total.bytesize > offset }
+chunk                                   # => "cd" (contains byte offset 3)
+before.to_a                             # => ["ab"]
+after.to_a                              # => ["ef"]
+```
+
+When an element is not its own measure, pass a `measure:` callable:
+
+``` ruby
+chunks = Hamster::MeasuredDeque.empty(0, measure: :bytesize.to_proc) { |a, b| a + b }
+chunks = chunks.push("ab").push("cde")
+chunks.measure                          # => 5
+```
+
+`split` returns `[before, element, after]`. On an empty deque it returns `[self, nil, self]`; if the predicate never becomes true it returns the whole deque as `before`, a `nil` element, and an empty deque as `after`; if the predicate is already true at the identity it locates the first element. `take_measure` and `drop_measure` return the two sides directly. All operations return new, immutable deques.
 
 
 <h2>Transformations</h2>

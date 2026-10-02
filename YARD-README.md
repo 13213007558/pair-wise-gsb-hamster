@@ -4,7 +4,7 @@ Hamster
 Efficient, immutable, and thread-safe collection classes for Ruby.
 
 Hamster provides 6 [Persistent Data
-Structures][PDS]: {Hamster::Hash Hash}, {Hamster::Vector Vector}, {Hamster::Set Set}, {Hamster::SortedSet SortedSet}, {Hamster::List List}, and {Hamster::Deque Deque} (which works as an immutable queue or stack).
+Structures][PDS]: {Hamster::Hash Hash}, {Hamster::Vector Vector}, {Hamster::Set Set}, {Hamster::SortedSet SortedSet}, {Hamster::List List}, {Hamster::Deque Deque} (which works as an immutable queue or stack), and {Hamster::MeasuredDeque MeasuredDeque}, a measured deque that supports splitting by accumulated measure.
 
 Hamster collections are **immutable**. Whenever you modify a Hamster
 collection, the original is preserved and a modified copy is returned. This
@@ -328,6 +328,18 @@ deque.unshift(:a)               # => Hamster::Deque[:a, 1, 2, 3]
 ```
 
 Of course, you can do the same thing with a `Vector`, but a `Deque` is more efficient. See the {Hamster::Deque API documentation} for details on all Deque methods.
+
+<h2>MeasuredDeque</h2>
+
+A {Hamster::MeasuredDeque MeasuredDeque} attaches a *measure* to every element. You supply an identity and an associative combine block (a monoid); it caches aggregate measures, supports end operations and concatenation like a `Deque`, and can locate an element by accumulated measure in logarithmic time. The combine block need not be commutative, so string concatenation works for finding a chunk by cumulative byte offset:
+
+``` ruby
+chunks = Hamster::MeasuredDeque.new("", ["ab", "cd", "ef"]) { |a, b| a + b }
+before, chunk, after = chunks.split { |total| total.bytesize > 2 }
+chunk   # => "cd"
+```
+
+See the {Hamster::MeasuredDeque API documentation} for the boundary conventions of `split`.
 
 <h2>Transformations</h2>
 
