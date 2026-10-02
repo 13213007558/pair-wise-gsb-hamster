@@ -39,4 +39,10 @@ describe :Hamster do
       expect(system(%{ruby -e "$:.unshift('#{hamster_lib_dir}'); require 'hamster/deque'; Hamster::Deque.new"})).to be(true)
     end
   end
+
+  describe :MeasuredDeque do
+    it "can be loaded separately" do
+      expect(system(%{ruby -e "$:.unshift('#{hamster_lib_dir}'); require 'hamster/measured_deque'; Hamster::MeasuredDeque.empty(identity: 0, combine: Proc.new { |a,b| a+b })"})).to be(true)
+    end
+  end
 end

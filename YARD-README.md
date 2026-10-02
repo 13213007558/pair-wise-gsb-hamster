@@ -3,8 +3,8 @@ Hamster
 
 Efficient, immutable, and thread-safe collection classes for Ruby.
 
-Hamster provides 6 [Persistent Data
-Structures][PDS]: {Hamster::Hash Hash}, {Hamster::Vector Vector}, {Hamster::Set Set}, {Hamster::SortedSet SortedSet}, {Hamster::List List}, and {Hamster::Deque Deque} (which works as an immutable queue or stack).
+Hamster provides 7 [Persistent Data
+Structures][PDS]: {Hamster::Hash Hash}, {Hamster::Vector Vector}, {Hamster::Set Set}, {Hamster::SortedSet SortedSet}, {Hamster::List List}, {Hamster::Deque Deque} (which works as an immutable queue or stack), and {Hamster::MeasuredDeque MeasuredDeque} (which tracks a user-defined cumulative measurement).
 
 Hamster collections are **immutable**. Whenever you modify a Hamster
 collection, the original is preserved and a modified copy is returned. This
@@ -328,6 +328,26 @@ deque.unshift(:a)               # => Hamster::Deque[:a, 1, 2, 3]
 ```
 
 Of course, you can do the same thing with a `Vector`, but a `Deque` is more efficient. See the {Hamster::Deque API documentation} for details on all Deque methods.
+
+<h2>Measured Deque</h2>
+
+A `MeasuredDeque` keeps a monoidal measurement for each item and a cached cumulative measurement for every balanced subtree. Provide an identity, an optional way to measure each item, and an associative combining function. The combining function is not required to be commutative.
+
+```ruby
+blocks = Hamster::MeasuredDeque.new(
+  ["ab", "cdef", "g"],
+  identity: 0,
+  measure: :bytesize,
+  combine: ->(left, right) { left + right }
+)
+
+# Offset 4 is the start of "cdef"; use a strict > predicate so exact block
+# boundaries start in the next block.
+prefix, remainder = blocks.span_measure { |bytes| bytes > 4 }
+remainder.first # => "cdef"
+```
+
+If the predicate matches the identity, the split is before every item. If it never matches, the remainder is empty; an empty deque splits into two empty deques.
 
 <h2>Transformations</h2>
 
