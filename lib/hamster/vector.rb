@@ -2,6 +2,7 @@ require "hamster/immutable"
 require "hamster/enumerable"
 require "hamster/hash"
 require "hamster/associable"
+require "hamster/transient_vector"
 
 module Hamster
   # A `Vector` is an ordered, integer-indexed collection of objects. Like
@@ -102,6 +103,39 @@ module Hamster
     # @return [Boolean]
     def empty?
       @size == 0
+    end
+
+    # Return a short-lived, mutable {TransientVector} editing session
+    # seeded with the contents of this vector. Use it to apply a batch of
+    # changes efficiently, then call {TransientVector#persistent!} to
+    # obtain an immutable `Vector` again. This vector is never modified.
+    #
+    # If a block is given, the transient is yielded to it and persisted
+    # automatically; the block form returns the resulting immutable
+    # `Vector`. If the block raises, the transient is discarded and this
+    # vector is left unchanged.
+    #
+    # @example
+    #   vector.transient do |editor|
+    #     editor.push(6)
+    #     editor.put(0, :changed)
+    #   end
+    #   # => Hamster::Vector[:changed, 2, 3, 4, 5, 6]
+    #
+    # @overload transient
+    #   @return [TransientVector]
+    # @overload transient { |editor| ... }
+    #   @yield [editor] a {TransientVector} seeded from this vector
+    #   @return [Vector]
+    def transient
+      editor = TransientVector.new(self.class, @root, @size, @levels)
+      return editor unless block_given?
+      begin
+        yield editor
+        editor.persistent!
+      ensure
+        editor.invalidate_transient!
+      end
     end
 
     # Return the first item in the `Vector`. If the vector is empty, return `nil`.

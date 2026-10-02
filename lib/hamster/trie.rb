@@ -1,3 +1,5 @@
+require "hamster/transient"
+
 module Hamster
   # @private
   class Trie
@@ -249,6 +251,90 @@ module Hamster
       entry && value.eql?(entry[1])
     end
 
+    # --- Transient (in-place batch editing) support -----------------------
+    #
+    # These methods mutate nodes in place, but only nodes which are owned by
+    # the given transient token. Any node still shared with an immutable
+    # collection is copied on first write, so existing immutable values are
+    # never corrupted. All of them verify that the token is still alive, so
+    # writes attempted after the owning session has been persisted fail.
+
+    # Returns true if this node is owned by the given transient token.
+    #
+    # @private
+    def transient_owned_by?(token)
+      @transient_token.equal?(token)
+    end
+
+    # Returns a mutable copy of this node, owned by the given token. The
+    # receiver is left unchanged.
+    #
+    # @private
+    def transient_copy(token)
+      ensure_transient_token_alive!(token)
+      copy = Trie.new(@significant_bits, @size, @entries.dup, @children.dup)
+      copy.instance_variable_set(:@transient_token, token)
+      copy
+    end
+
+    # In-place variant of #put for transient editing sessions. The receiver
+    # must be owned by +token+ (see #transient_copy). Returns +self+.
+    #
+    # @private
+    def put_transient(key, value, token)
+      ensure_transient_token_alive!(token)
+      index = index_for(key)
+      entry = @entries[index]
+      if !entry
+        @size += 1
+        key = key.dup.freeze if key.is_a?(String) && !key.frozen?
+        @entries[index] = [key, value].freeze
+      elsif entry[0].eql?(key)
+        key = key.dup.freeze if key.is_a?(String) && !key.frozen?
+        @entries[index] = [key, value].freeze
+      else
+        child = @children[index]
+        if child
+          child = child.transient_copy(token) unless child.transient_owned_by?(token)
+          @children[index] = child
+          old_child_size = child.size
+          child.put_transient(key, value, token)
+          @size += child.size - old_child_size
+        else
+          child = Trie.new(@significant_bits + 5)
+          child.instance_variable_set(:@transient_token, token)
+          @children[index] = child
+          child.put_transient(key, value, token)
+          @size += 1
+        end
+      end
+      self
+    end
+
+    # In-place variant of #delete for transient editing sessions. The
+    # receiver must be owned by +token+. Returns +self+.
+    #
+    # @private
+    def delete_transient(key, token)
+      ensure_transient_token_alive!(token)
+      index = index_for(key)
+      entry = @entries[index]
+      if entry && entry[0].eql?(key)
+        delete_entry_transient(index, token)
+      else
+        child = @children[index]
+        if child
+          child = child.transient_copy(token) unless child.transient_owned_by?(token)
+          @children[index] = child
+          old_child_size = child.size
+          child.delete_transient(key, token)
+          @size -= old_child_size - child.size
+          @children[index] = nil if child.size == 0
+        end
+      end
+      self
+    end
+
     def at(index)
       @entries.each do |entry|
         if entry
@@ -280,6 +366,33 @@ module Hamster
     alias :== :eql?
 
     protected
+
+    # Removes the entry stored at +index+ in this node, promoting the first
+    # entry of the child trie (if any) into its place. The receiver must be
+    # owned by +token+. Used by #delete_transient.
+    def delete_entry_transient(index, token)
+      child = @children[index]
+      if child
+        child = child.transient_copy(token) unless child.transient_owned_by?(token)
+        @children[index] = child
+        child_index = child.first_entry_index
+        @entries[index] = child.entries[child_index]
+        child.delete_entry_transient(child_index, token)
+        @children[index] = nil if child.size == 0
+      else
+        @entries[index] = nil
+      end
+      @size -= 1
+      self
+    end
+
+    # @private
+    attr_reader :entries
+
+    # @private
+    def first_entry_index
+      @entries.index { |entry| entry }
+    end
 
     # Returns a replacement instance after removing the specified key.
     # If not found, returns <tt>self</tt>.
@@ -326,6 +439,12 @@ module Hamster
 
     def index_for(key)
       (key.hash.abs >> @significant_bits) & 31
+    end
+
+    def ensure_transient_token_alive!(token)
+      unless token.alive?
+        raise Transient::InactiveError, "can't use transient after it has been persisted"
+      end
     end
 
     def copy_size(copy)

@@ -276,6 +276,31 @@ Besides `Hamster::List[]` there are other ways to construct lists:
   - `Hamster::List.empty` returns an empty list, which you can
     build up using repeated calls to `#add` or other `List` methods.
 
+### Bulk Updates
+
+Applying thousands of changes one at a time through `#put`/`#add` builds
+a new immutable collection on every call. When you know you are going to
+make a batch of changes, `Hash#transient` and `Vector#transient` open a
+short-lived, mutable editing session instead:
+
+``` ruby
+hash = Hamster::Hash[a: 1, b: 2]
+new_hash = hash.transient do |editor|
+  10_000.times { |i| editor.put(i, i * 2) }
+  editor.delete(:a)
+end
+```
+
+The editor applies changes in place and `transient` returns a single,
+ordinary immutable collection at the end. Without a block,
+`hash.transient` returns the editor and you finish the session yourself
+by calling `editor.persistent!`.
+
+Editors play by strict rules: they may only be used from the thread that
+created them, and once persisted they are dead -- any further use raises
+an error. The immutable collections they were created from are never
+modified, even if the editing session is abandoned midway.
+
 ### Core Extensions
 
 `Enumerable#to_list` will convert any existing `Enumerable` to a list, so you can

@@ -1,6 +1,12 @@
 Changelog
 =========
 
+  - Unreleased
+    * [Added] `Hamster::Hash#transient` and `Hamster::Vector#transient`,
+      short-lived single-threaded batch editing sessions
+      (`Hamster::TransientHash` / `Hamster::TransientVector`) which apply
+      many changes in place and produce one immutable value via
+      `#persistent!`
   - 3.0.0
     * [Changed] the behavior of Hamster::Hash#values_at
     * [Added] Hamster::Hash#dig and Hamster::Enumerable#grep_v

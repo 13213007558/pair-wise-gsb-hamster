@@ -5,6 +5,7 @@ require "hamster/trie"
 require "hamster/set"
 require "hamster/vector"
 require "hamster/associable"
+require "hamster/transient_hash"
 
 module Hamster
   # A `Hamster::Hash` maps a set of unique keys to corresponding values, much
@@ -110,6 +111,39 @@ module Hamster
     # @return [Proc]
     def default_proc
       @default
+    end
+
+    # Return a short-lived, mutable {TransientHash} editing session seeded
+    # with the contents of this hash. Use it to apply a batch of changes
+    # efficiently, then call {TransientHash#persistent!} to obtain an
+    # immutable `Hash` again. This hash is never modified.
+    #
+    # If a block is given, the transient is yielded to it and persisted
+    # automatically; the block form returns the resulting immutable `Hash`.
+    # If the block raises, the transient is discarded and this hash is left
+    # unchanged.
+    #
+    # @example
+    #   hash.transient do |editor|
+    #     editor.put(:a, 1)
+    #     editor.delete(:b)
+    #   end
+    #   # => Hamster::Hash[:a => 1]
+    #
+    # @overload transient
+    #   @return [TransientHash]
+    # @overload transient { |editor| ... }
+    #   @yield [editor] a {TransientHash} seeded from this hash
+    #   @return [Hash]
+    def transient
+      editor = TransientHash.new(self.class, @trie, @default)
+      return editor unless block_given?
+      begin
+        yield editor
+        editor.persistent!
+      ensure
+        editor.invalidate_transient!
+      end
     end
 
     # Return the number of key/value pairs in this `Hash`.
