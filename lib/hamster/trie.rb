@@ -63,6 +63,20 @@ module Hamster
       bulk_delete(keys_to_delete)
     end
 
+    # Combines the values stored under matching keys. Unchanged sub-tries are
+    # retained. Supported operations are :+ (add), :max, :min, and :- (with
+    # negative results truncated to zero).
+    #
+    # @return [Trie]
+    # @private
+    def combine(other, operation)
+      return self if equal?(other) && (operation == :max || operation == :min)
+      return EmptyTrie if equal?(other) && operation == :-
+      return self if other.empty? || (empty? && (operation == :min || operation == :-))
+      return other if empty?
+      combine_tries(self, other, operation)
+    end
+
     # @return [Trie] A copy of `self` with the given value associated with the
     #   key (or `self` if no modification was needed because an identical
     #   key-value pair wes already stored
@@ -323,6 +337,146 @@ module Hamster
     end
 
     private
+
+    def combine_tries(left, right, operation)
+      entries = left.instance_variable_get(:@entries)
+      children = left.instance_variable_get(:@children)
+      changed = false
+
+      32.times do |index|
+        left_entry = entries[index]
+        right_entry = right.instance_variable_get(:@entries)[index]
+        left_child = children[index]
+        right_child = right.instance_variable_get(:@children)[index]
+
+        if matching_slot_entries?(left_entry, right_entry)
+          value = combine_values(left_entry[1], right_entry[1], operation)
+          child = nonempty_trie(combine_slot_children(left_child, right_child, operation))
+          entry_changed = value == 0 || value != left_entry[1]
+          child_changed = child ? !child.equal?(left_child) : !!left_child
+
+          if entry_changed
+            entries = entries.dup
+            entries[index] = value > 0 ? [left_entry[0], value].freeze : nil
+          end
+          if child_changed
+            children = children.dup
+            children[index] = child
+          end
+          changed ||= entry_changed || child_changed
+        elsif left_entry || left_child
+          if right_entry || right_child
+            entry, child = combine_collided_slot(left_entry, left_child,
+                                                right_entry, right_child, operation)
+            unless entry.equal?(left_entry)
+              entries = entries.dup
+              entries[index] = entry
+              changed = true
+            end
+            unless child.equal?(left_child)
+              children = children.dup
+              children[index] = child
+              changed = true
+            end
+          else
+            unless keeps_side_without_other?(operation)
+              if left_entry
+                entries = entries.dup
+                entries[index] = nil
+              end
+              if left_child
+                children = children.dup
+                children[index] = nil
+              end
+              changed = true
+            end
+          end
+        elsif right_entry || right_child
+          if keeps_side_without_other?(operation) && operation != :-
+            if right_entry
+              entries = entries.dup
+              entries[index] = right_entry
+            end
+            if right_child
+              children = children.dup
+              children[index] = right_child
+            end
+            changed = true
+          end
+        end
+      end
+
+      return left unless changed
+      new_size = entries.compact.size
+      children.each { |child| new_size += child.size if child }
+      Trie.new(left.instance_variable_get(:@significant_bits), new_size, entries, children)
+    end
+
+    def matching_slot_entries?(left_entry, right_entry)
+      left_entry && right_entry &&
+        left_entry[0].eql?(right_entry[0])
+    end
+
+    def combine_slot_children(left_child, right_child, operation)
+      if left_child && right_child
+        left_child.combine(right_child, operation)
+      elsif left_child && keeps_side_without_other?(operation)
+        left_child
+      elsif right_child && keeps_side_without_other?(operation) && operation != :-
+        right_child
+      end
+    end
+
+    def combine_collided_slot(left_entry, left_child, right_entry, right_child, operation)
+      bits = @significant_bits + 5
+      if left_entry
+        entry = operation == :min ? nil : left_entry
+        right_slot = slot_with_entry(right_entry, right_child, bits)
+        child = combine_optional_tries(left_child, right_slot, operation)
+      else
+        entry = (operation == :+ || operation == :max) ? right_entry : nil
+        child = combine_optional_tries(left_child, right_child, operation)
+        child = combine_optional_tries(child, pair_trie(bits, right_entry), operation) if right_entry
+      end
+      [entry, child]
+    end
+
+    def combine_optional_tries(left, right, operation)
+      return right if left.nil? && (operation == :+ || operation == :max)
+      return left if right.nil? && operation != :min
+      return nil if left.nil? || right.nil?
+      nonempty_trie(left.combine(right, operation))
+    end
+
+    def slot_with_entry(entry, child, bits)
+      return child unless entry
+      combine_optional_tries(pair_trie(bits, entry), child, :+)
+    end
+
+    def nonempty_trie(trie)
+      trie unless trie.nil? || trie.empty?
+    end
+
+    def pair_trie(bits, entry)
+      entries = []
+      entries[(entry[0].hash.abs >> bits) & 31] = entry
+      Trie.new(bits, 1, entries, [])
+    end
+
+    def combine_values(left, right, operation)
+      value = case operation
+              when :+ then left + right
+              when :max then [left, right].max
+              when :min then [left, right].min
+              when :- then left - right
+              else raise ArgumentError, "unknown trie combination: #{operation.inspect}"
+              end
+      value > 0 ? value : 0
+    end
+
+    def keeps_side_without_other?(operation)
+      operation == :+ || operation == :max || operation == :-
+    end
 
     def index_for(key)
       (key.hash.abs >> @significant_bits) & 31
