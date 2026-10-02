@@ -161,6 +161,22 @@ Like most Hamster methods, the set-theoretic methods `#union`, `#intersection`, 
 See the [API documentation][SET-DOC] for details on all `Set` methods.
 
 
+### Multiset
+
+A `Multiset` tracks the multiplicity of each distinct item.
+
+```ruby
+left  = Hamster::Multiset[:a, :a, :b]
+right = Hamster::Multiset[:a, :b, :b]
+
+(left + right)      # => Hamster::Multiset[:a, :a, :a, :b, :b, :b]
+(left | right)      # => Hamster::Multiset[:a, :a, :b, :b]
+(left & right)      # => Hamster::Multiset[:a, :b]
+(left - right)      # => Hamster::Multiset[:a]
+left.distinct_size  # => 2
+left.size           # => 3
+```
+
 <h2>SortedSet <span style="font-size:0.7em">(<a href="http://rubydoc.info/github/hamstergem/hamster/master/Hamster/SortedSet">API Documentation</a>)</span></h2>
 
 A `SortedSet` is like a `Set`, but ordered. You can do everything with it that you can

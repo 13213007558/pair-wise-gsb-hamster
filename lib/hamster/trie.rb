@@ -7,6 +7,12 @@ module Hamster
       result
     end
 
+    def self.single_entry(significant_bits, index, key, value)
+      entries = []
+      entries[index] = [key, value].freeze
+      new(significant_bits, 1, entries, [])
+    end
+
     # Returns the number of key-value pairs in the trie.
     attr_reader :size
 
@@ -152,6 +158,81 @@ module Hamster
       else
         self
       end
+    end
+
+    # Returns a copy combined with another trie. When both tries contain the
+    # same key, the block chooses the new value; nil removes the key.
+    def combine(other, keep_left = true, keep_right = true, &block)
+      return self if equal?(other)
+      combine_nodes(self, other, keep_left, keep_right, &block)
+    end
+
+    # Combine one bucket from each trie. The pair arguments are entries which
+    # occupy that bucket directly. The node arguments are collision children.
+    def legacy_combine_bucket(index, left_pair, right_pair, left_node, right_node,
+                       keep_left, keep_right, &block)
+      legacy_combine_pairs(
+        left_pair, left_node,
+        right_pair, right_node,
+        @significant_bits + 5, keep_left, keep_right, &block
+      )
+    end
+
+    def combine_pairs(left_pair, left_node, right_pair, right_node, bits,
+                      keep_left, keep_right, &block)
+      if left_pair && right_pair && left_pair[0].eql?(right_pair[0])
+        value = yield(left_pair[1], right_pair[1])
+        children = combine_nodes(left_node, right_node, bits + 5,
+                                 keep_left, keep_right, &block)
+        return children if value.nil?
+        return Trie.single_entry(bits, index_for_at(bits, left_pair[0]), left_pair[0], value) unless children
+        return left_node if value == left_pair[1] && left_node && !right_node
+        return right_node if value == right_pair[1] && right_node && !left_node
+
+        node = children || Trie.new(bits)
+        Trie.single_entry(bits, index_for_at(bits, left_pair[0]), left_pair[0], value)
+          .combine(node, true, true, &block)
+      elsif left_pair && right_pair
+        left = Trie.single_entry(bits, index_for_at(bits, left_pair[0]), left_pair[0], left_pair[1])
+        right = Trie.single_entry(bits, index_for_at(bits, right_pair[0]), right_pair[0], right_pair[1])
+        left = left.combine(left_node || Trie.new(bits), true, true) { |l, r| l } unless left_node
+        right = right.combine(right_node || Trie.new(bits), true, true) { |l, r| r } unless right_node
+        left.combine(right, keep_left, keep_right, &block)
+      elsif left_pair
+        if right_node
+          pair_node = Trie.single_entry(bits, index_for_at(bits, left_pair[0]), left_pair[0], left_pair[1])
+          pair_node = pair_node.combine(left_node, true, true) { |l, _| l } if left_node
+          pair_node.combine(right_node, keep_left, keep_right, &block)
+        elsif keep_left
+          node = Trie.single_entry(bits, index_for_at(bits, left_pair[0]), left_pair[0], left_pair[1])
+          left_node ? node.combine(left_node, true, true) { |l, _| l } : node
+        end
+      elsif right_pair
+        if left_node
+          pair_node = Trie.single_entry(bits, index_for_at(bits, right_pair[0]), right_pair[0], right_pair[1])
+          pair_node = pair_node.combine(right_node, true, true) { |_, r| r } if right_node
+          left_node.combine(pair_node, keep_left, keep_right, &block)
+        elsif keep_right
+          node = Trie.single_entry(bits, index_for_at(bits, right_pair[0]), right_pair[0], right_pair[1])
+          right_node ? node.combine(right_node, true, true) { |_, r| r } : node
+        end
+      else
+        combine_nodes(left_node, right_node, bits, keep_left, keep_right, &block)
+      end
+    end
+
+    def combine_nodes(left_node, right_node, bits, keep_left, keep_right, &block)
+      if left_node && right_node
+        left_node.combine(right_node, keep_left, keep_right, &block)
+      elsif left_node
+        keep_left ? left_node : nil
+      elsif right_node
+        keep_right ? right_node : nil
+      end
+    end
+
+    def index_for_at(bits, key)
+      (key.hash.abs >> bits) & 31
     end
 
     # Returns <tt>self</tt> after overwriting the element associated with the specified key.
@@ -323,6 +404,176 @@ module Hamster
     end
 
     private
+
+    def combine_nodes(left, right, keep_left, keep_right, &block)
+      return keep_left ? left : nil unless right
+      return keep_right ? right : nil unless left
+
+      left_entries = left.instance_variable_get(:@entries)
+      right_entries = right.instance_variable_get(:@entries)
+      left_children = left.instance_variable_get(:@children)
+      right_children = right.instance_variable_get(:@children)
+      entries = nil
+      children = nil
+      changed = false
+
+      32.times do |index|
+        left_entry = left_entries[index]
+        right_entry = right_entries[index]
+        left_child = left_children[index]
+        right_child = right_children[index]
+
+        next unless left_entry || right_entry || left_child || right_child
+
+        if left_entry && right_entry && left_entry[0].eql?(right_entry[0])
+          value = yield(left_entry[1], right_entry[1])
+          child = combine_nodes(left_child, right_child, keep_left, keep_right, &block)
+
+          if value.nil?
+            entries ||= left_entries.dup
+            entries[index] = nil
+            changed = true
+          elsif value != left_entry[1]
+            entries ||= left_entries.dup
+            entries[index] = [left_entry[0], value].freeze
+            changed = true
+          end
+
+          if child.nil?
+            if left_child
+              children ||= left_children.dup
+              children[index] = nil
+              changed = true
+            end
+          elsif !child.equal?(left_child)
+            children ||= left_children.dup
+            children[index] = child
+            changed = true
+          end
+        else
+          child = combine_bucket(
+            left_child, left_entry,
+            right_child, right_entry,
+            keep_left, keep_right, &block
+          )
+
+          if child.nil?
+            if left_entry || left_child
+              entries ||= left_entries.dup
+              children ||= left_children.dup
+              entries[index] = nil
+              children[index] = nil
+              changed = true
+            end
+          elsif child.equal?(left_child) && !left_entry
+            next
+          elsif child.size == 1 &&
+                ((left_entry && !right_entry && !left_child && keep_left && child.at(0)[0].eql?(left_entry[0])) ||
+                 (right_entry && !left_entry && keep_right && child.at(0)[0].eql?(right_entry[0])))
+            entry = child.at(0)
+            key_index = (entry[0].hash.abs >> left.instance_variable_get(:@significant_bits)) & 31
+            if key_index == index && !left_child && !right_child &&
+               ((left_entry && entry[0].eql?(left_entry[0])) ||
+                (right_entry && entry[0].eql?(right_entry[0])))
+              entries ||= left_entries.dup
+              entries[index] = entry
+              changed = true
+            else
+              children ||= left_children.dup
+              children[index] = child
+              changed = true
+            end
+          else
+            entries ||= left_entries.dup
+            children ||= left_children.dup
+            entries[index] = nil
+            children[index] = child
+            changed = true
+          end
+        end
+      end
+
+      return left unless changed
+
+      result_entries = entries || left_entries
+      result_children = children || left_children
+      new_size = 0
+      result_entries.each { |entry| new_size += 1 if entry }
+      result_children.each { |node| new_size += node.size if node }
+      return nil if new_size == 0
+
+      result = Trie.new(left.instance_variable_get(:@significant_bits), new_size,
+                        result_entries, result_children)
+      return left if keep_left && result.eql?(left)
+      return right if keep_right && result.eql?(right)
+      result
+    end
+
+    def combine_bucket(left_child, left_entry, right_child, right_entry,
+                       keep_left, keep_right, &block)
+      if left_entry && right_entry
+        if left_entry[0].eql?(right_entry[0])
+          value = yield(left_entry[1], right_entry[1])
+          child = combine_nodes(left_child, right_child, keep_left, keep_right, &block)
+          return child if value.nil?
+          pair_bits = (left_child || right_child)
+          bits = pair_bits ? pair_bits.instance_variable_get(:@significant_bits) : @significant_bits + 5
+          pair = make_pair_node(nil, left_entry, value, bits)
+          child ? combine_nodes(pair, child, true, true) { |pair_value, _| pair_value } : pair
+        end
+
+        left = make_pair_node(left_child, left_entry, left_entry[1], @significant_bits + 5)
+        right = make_pair_node(right_child, right_entry, right_entry[1], @significant_bits + 5)
+        combine_nodes(left, right, keep_left, keep_right, &block)
+      elsif left_entry
+        left = make_pair_node(left_child, left_entry, left_entry[1], @significant_bits + 5)
+        right = right_child
+        right ? combine_nodes(left, right, keep_left, keep_right, &block) : (keep_left ? left : nil)
+      elsif right_entry
+        right = make_pair_node(right_child, right_entry, right_entry[1], @significant_bits + 5)
+        left = left_child
+        left ? combine_nodes(left, right, keep_left, keep_right, &block) : (keep_right ? right : nil)
+      else
+        combine_nodes(left_child, right_child, keep_left, keep_right, &block)
+      end
+    end
+
+    def make_pair_node(child, entry, value, bits, existing_child = nil)
+      pair_bits = bits
+      node = Trie.new(pair_bits)
+      node = insert_pair_at(node, pair_bits, entry[0], value)
+      child ? combine_nodes(node, child, true, true) { |left, _| left } : node
+    end
+
+    def insert_pair_at(node, bits, key, value)
+      index = (key.hash.abs >> bits) & 31
+      entries = node.instance_variable_get(:@entries)
+      children = node.instance_variable_get(:@children)
+      existing = entries[index]
+
+      if existing.nil?
+        new_entries = entries.dup
+        new_entries[index] = [key, value].freeze
+        Trie.new(bits, node.size + 1, new_entries, children)
+      elsif existing[0].eql?(key)
+        node
+      else
+        existing_child = children[index]
+        new_child = if existing_child
+          insert_pair_at(existing_child, bits + 5, key, value)
+        else
+          new_entries = []
+          next_index = (key.hash.abs >> (bits + 5)) & 31
+          new_entries[next_index] = [key, value].freeze
+          Trie.new(bits + 5, 1, new_entries, [])
+        end
+        new_children = children.dup
+        new_children[index] = new_child
+        size = node.size + (new_child.size - (existing_child ? existing_child.size : 0))
+        Trie.new(bits, size, entries, new_children)
+      end
+    end
+
 
     def index_for(key)
       (key.hash.abs >> @significant_bits) & 31
