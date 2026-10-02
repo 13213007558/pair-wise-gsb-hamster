@@ -48,6 +48,34 @@ module Hamster
     # @private
     BITS_PER_LEVEL = 5
 
+    # @private
+    #
+    # An interior trie node which, unlike a plain `Array` node, does not
+    # require all of its children (except the last) to be completely full.
+    # Because child subtrees may contain varying numbers of items, the
+    # cumulative item counts are stored explicitly in `sizes`, and are used
+    # (instead of bit-shifting the index) when descending the trie.
+    #
+    # Nodes of this kind are produced by {#split_at}, {.concat_many} and
+    # vector-to-vector concatenation, which reuse whole subtrees from their
+    # inputs instead of rebuilding the trie element by element. A plain
+    # `Array` node only ever contains other plain `Array` nodes (or leaves),
+    # so all pre-existing, bit-shift based code paths can keep assuming the
+    # strict layout whenever the root is not a `RelaxedNode`.
+    class RelaxedNode
+      # @return [Array] child nodes, frozen
+      attr_reader :children
+      # @return [Array] cumulative item counts: sizes[i] is the total
+      #   number of leaf items contained in children[0..i], frozen
+      attr_reader :sizes
+
+      def initialize(children, sizes)
+        @children = children.freeze
+        @sizes = sizes.freeze
+        freeze
+      end
+    end
+
     # Return the number of items in this `Vector`
     # @return [Integer]
     attr_reader :size
@@ -79,6 +107,31 @@ module Hamster
         obj.instance_variable_set(:@size, size)
         obj.instance_variable_set(:@levels, levels)
         obj
+      end
+
+      # Return a new `Vector` built by concatenating the given vectors (or
+      # other collections convertible to arrays) in order. A single enumerable
+      # of collections may also be passed.
+      #
+      # Unlike repeated use of {#+} with arrays, whole subtrees of the input
+      # vectors are reused structurally, so concatenating many batches does
+      # not require copying all of their elements, and the resulting trie
+      # stays balanced (its depth grows logarithmically, not linearly, with
+      # the number of batches).
+      #
+      # @example
+      #   Hamster::Vector.concat_many(Hamster::Vector[1, 2], [3, 4], Hamster::Vector[5])
+      #   # => Hamster::Vector[1, 2, 3, 4, 5]
+      #
+      # @param vectors [Array] the collections to concatenate
+      # @return [Vector]
+      def concat_many(*vectors)
+        if vectors.size == 1 && !vectors[0].is_a?(Vector) && vectors[0].is_a?(::Enumerable)
+          vectors = vectors[0].to_a
+        end
+        vectors.reduce(empty) do |result, vector|
+          result.concat_vector(vector.is_a?(Vector) ? vector : new(vector.to_a))
+        end
       end
     end
 
@@ -214,7 +267,8 @@ module Hamster
       return nil if @size == 0
       index += @size if index < 0
       return nil if index >= @size || index < 0
-      leaf_node_for(@root, @levels * BITS_PER_LEVEL, index)[index & INDEX_MASK]
+      leaf, index = leaf_node_for(@root, @levels * BITS_PER_LEVEL, index)
+      leaf[index & INDEX_MASK]
     end
     alias :at :get
 
@@ -347,6 +401,15 @@ module Hamster
       raise IndexError if index < -@size
       index += @size if index < 0
 
+      if @root.is_a?(RelaxedNode)
+        if index >= @size
+          suffix = index > @size ? Array.new(index - @size, nil).concat(items) : items
+          return concat_vector(self.class.new(suffix))
+        end
+        left, right = split_at(index)
+        return left.concat_vector(self.class.new(items)).concat_vector(right)
+      end
+
       if index < @size
         suffix = flatten_suffix(@root, @levels * BITS_PER_LEVEL, index, [])
         suffix.unshift(*items)
@@ -373,6 +436,11 @@ module Hamster
       return self if index >= @size || index < -@size
       index += @size if index < 0
 
+      if @root.is_a?(RelaxedNode)
+        left, right = split_at(index)
+        return left.concat_vector(right.split_at(1).last)
+      end
+
       suffix = flatten_suffix(@root, @levels * BITS_PER_LEVEL, index, [])
       replace_suffix(index, suffix.tap { |a| a.shift })
     end
@@ -386,6 +454,7 @@ module Hamster
     # @return [Vector]
     def pop
       return self if @size == 0
+      return split_at(@size - 1).first if @root.is_a?(RelaxedNode)
       replace_suffix(@size-1, [])
     end
 
@@ -597,11 +666,85 @@ module Hamster
     # @param other [Enumerable] The collection to concatenate onto this vector
     # @return [Vector]
     def +(other)
-      other = other.to_a
-      other = other.dup if other.frozen?
-      replace_suffix(@size, other)
+      if other.is_a?(Vector)
+        concat_vector(other)
+      elsif @root.is_a?(RelaxedNode)
+        concat_vector(self.class.new(other.to_a))
+      else
+        other = other.to_a
+        other = other.dup if other.frozen?
+        replace_suffix(@size, other)
+      end
     end
     alias :concat :+
+
+    # Return a new `Vector` built by concatenating this vector with the
+    # given vectors (or other collections convertible to arrays), in order.
+    #
+    # Whole subtrees of the inputs are reused structurally, so this is more
+    # efficient than repeatedly calling {#+} with arrays, and the resulting
+    # trie stays balanced even when concatenating many small batches.
+    #
+    # @example
+    #   Hamster::Vector[1, 2].concat_many([3, 4], Hamster::Vector[5])
+    #   # => Hamster::Vector[1, 2, 3, 4, 5]
+    #
+    # @param others [Array] the collections to concatenate onto this vector
+    # @return [Vector]
+    def concat_many(*others)
+      others.reduce(self) do |result, other|
+        result.concat_vector(other.is_a?(Vector) ? other : self.class.new(other.to_a))
+      end
+    end
+
+    # Split this vector at the given `index`, returning two new vectors: one
+    # with the items before `index`, and one with the items from `index`
+    # onwards. If `index` is negative, it counts back from the end.
+    #
+    # The two returned vectors share structure with this one (and with each
+    # other): only the nodes along the splitting boundary are copied, the
+    # rest of the trie is reused as-is. Subsequent updates to any of the
+    # three vectors leave the others unchanged.
+    #
+    # @example
+    #   Hamster::Vector[1, 2, 3, 4, 5].split_at(2)
+    #   # => [Hamster::Vector[1, 2], Hamster::Vector[3, 4, 5]]
+    #   Hamster::Vector[1, 2, 3].split_at(-1)
+    #   # => [Hamster::Vector[1, 2], Hamster::Vector[3]]
+    #
+    # @param index [Integer] The index to split at. May be negative.
+    # @return [Array(Vector, Vector)]
+    # @raise [IndexError] if index is out of negative range.
+    def split_at(index)
+      raise IndexError, "index #{index} outside of vector bounds" if index < -@size
+      index += @size if index < 0
+      index = 0 if index < 0
+      index = @size if index > @size
+      return [self.class.empty, self] if index == 0
+      return [self, self.class.empty] if index == @size
+      left, right = split_node(@root, @levels, index)
+      [vector_from_node(left, @levels, index),
+       vector_from_node(right, @levels, @size - index)]
+    end
+
+    # Return a new `Vector` built by concatenating this vector with
+    # `other`, which must also be a `Vector`. Whole subtrees of both
+    # vectors are reused structurally where possible.
+    #
+    # @return [Vector]
+    # @private
+    def concat_vector(other)
+      if @size == 0
+        return self.class.alloc(other.instance_variable_get(:@root),
+                                other.size,
+                                other.instance_variable_get(:@levels))
+      end
+      return self if other.size == 0
+      root, levels = concat_nodes(@root, @levels,
+                                  other.instance_variable_get(:@root),
+                                  other.instance_variable_get(:@levels))
+      self.class.alloc(root, @size + other.size, levels)
+    end
 
     # Combine two vectors by "zipping" them together. `others` should be arrays
     # and/or vectors. The corresponding elements from this `Vector` and each of
@@ -690,6 +833,7 @@ module Hamster
       return self if n == 0
       return self.class.empty if n >= @size
       raise ArgumentError, "attempt to drop negative size" if n < 0
+      return split_at(n).last if @root.is_a?(RelaxedNode)
       self.class.new(flatten_suffix(@root, @levels * BITS_PER_LEVEL, n, []))
     end
 
@@ -703,6 +847,10 @@ module Hamster
     # @return [Vector]
     def take(n)
       return self if n >= @size
+      if @root.is_a?(RelaxedNode)
+        raise ArgumentError, "attempt to take negative size" if n < 0
+        return split_at(n).first
+      end
       self.class.new(super)
     end
 
@@ -791,6 +939,18 @@ module Hamster
       raise IndexError if index < -@size
       index += @size if index < 0
       length ||= @size - index # to the end of the array, if no length given
+
+      if @root.is_a?(RelaxedNode)
+        length = 0 if length < 0
+        if index >= @size
+          padding = index > @size ? Array.new(index - @size, nil) : []
+          return concat_vector(self.class.new(padding.concat(Array.new(length, object))))
+        end
+        left = split_at(index).first
+        filled = self.class.new(Array.new(length, object))
+        return left.concat_vector(filled) if index + length >= @size
+        return left.concat_vector(filled).concat_vector(split_at(index + length).last)
+      end
 
       if index < @size
         suffix = flatten_suffix(@root, @levels * BITS_PER_LEVEL, index, [])
@@ -1285,7 +1445,12 @@ module Hamster
     def eql?(other)
       return true if other.equal?(self)
       return false unless instance_of?(other.class) && @size == other.size
-      @root.eql?(other.instance_variable_get(:@root))
+      # Two vectors with the same items may still have different internal
+      # trie layouts (e.g. after #split_at or #concat_many, which relax the
+      # usual node layout to maximize structural sharing), so compare
+      # element-wise, falling back to a fast structural check first.
+      return true if @root.eql?(other.instance_variable_get(:@root))
+      to_a.eql?(other.to_a)
     end
 
     # See `Object#hash`.
@@ -1309,24 +1474,49 @@ module Hamster
 
     def traverse_depth_first(node, level, &block)
       return node.each(&block) if level == 0
-      node.each { |child| traverse_depth_first(child, level - 1, &block) }
+      node_children(node).each { |child| traverse_depth_first(child, level - 1, &block) }
     end
 
     def reverse_traverse_depth_first(node, level, &block)
       return node.reverse_each(&block) if level == 0
-      node.reverse_each { |child| reverse_traverse_depth_first(child, level - 1, &block) }
+      node_children(node).reverse_each { |child| reverse_traverse_depth_first(child, level - 1, &block) }
     end
 
     def leaf_node_for(node, bitshift, index)
       while bitshift > 0
-        node = node[(index >> bitshift) & INDEX_MASK]
+        if node.is_a?(RelaxedNode)
+          slot = node.sizes.index { |size| index < size }
+          index -= node.sizes[slot - 1] if slot > 0
+          node = node.children[slot]
+        else
+          node = node[(index >> bitshift) & INDEX_MASK]
+        end
         bitshift -= BITS_PER_LEVEL
       end
-      node
+      [node, index]
+    end
+
+    def node_children(node)
+      node.is_a?(RelaxedNode) ? node.children : node
     end
 
     def update_root(index, item)
       root, levels = @root, @levels
+      if root.is_a?(RelaxedNode)
+        if index < @size
+          new_root = update_leaf_node(root, levels * BITS_PER_LEVEL, index, item)
+          return new_root.equal?(root) ? self : self.class.alloc(new_root, @size, levels)
+        end
+        new_root = relaxed_append(root, levels, item)
+        until new_root
+          # The relaxed root cannot absorb another item (every node on the
+          # right spine already has 32 children), so deepen the trie.
+          root = RelaxedNode.new([root], [subtree_size(root, levels)])
+          levels += 1
+          new_root = relaxed_append(root, levels, item)
+        end
+        return self.class.alloc(new_root, index + 1, levels)
+      end
       while index >= (1 << (BITS_PER_LEVEL * (levels + 1)))
         root = [root].freeze
         levels += 1
@@ -1340,6 +1530,16 @@ module Hamster
     end
 
     def update_leaf_node(node, bitshift, index, item)
+      if node.is_a?(RelaxedNode)
+        slot = node.sizes.index { |size| index < size }
+        index -= node.sizes[slot - 1] if slot > 0
+        child = node.children[slot]
+        new_child = update_leaf_node(child, bitshift - BITS_PER_LEVEL, index, item)
+        return node if new_child.equal?(child)
+        children = node.children.dup
+        children[slot] = new_child
+        return RelaxedNode.new(children, node.sizes)
+      end
       slot_index = (index >> bitshift) & INDEX_MASK
       if bitshift > 0
         old_child = node[slot_index] || []
@@ -1390,6 +1590,9 @@ module Hamster
     def flatten_node(node, bitshift, result)
       if bitshift == 0
         result.concat(node)
+      elsif node.is_a?(RelaxedNode)
+        bitshift -= BITS_PER_LEVEL
+        node.children.each { |child| flatten_node(child, bitshift, result) }
       elsif bitshift == BITS_PER_LEVEL
         node.each { |a| result.concat(a) }
       else
@@ -1403,7 +1606,11 @@ module Hamster
       return nil if from > @size || from < 0 || length < 0
       length = @size - from if @size < from + length
       return self.class.empty if length == 0
-      self.class.new(flatten_range(@root, @levels * BITS_PER_LEVEL, from, from + length - 1))
+      if @root.is_a?(RelaxedNode)
+        split_at(from).last.split_at(length).first
+      else
+        self.class.new(flatten_range(@root, @levels * BITS_PER_LEVEL, from, from + length - 1))
+      end
     end
 
     def flatten_suffix(node, bitshift, from, result)
@@ -1434,6 +1641,9 @@ module Hamster
     def replace_suffix(from, suffix)
       # new suffix can go directly after existing elements
       raise IndexError if from > @size
+      if @root.is_a?(RelaxedNode)
+        return split_at(from).first.concat_vector(self.class.new(suffix))
+      end
       root, levels = @root, @levels
 
       if (from >> (BITS_PER_LEVEL * (@levels + 1))) != 0
@@ -1504,6 +1714,172 @@ module Hamster
           raise "Shouldn't happen"
         end
       end
+    end
+
+    # Wrap a node produced by #split_node in a Vector, collapsing any
+    # chain of single-child interior nodes at the top.
+    def vector_from_node(node, level, size)
+      while level > 0 && node_children(node).size == 1
+        node = node_children(node).first
+        level -= 1
+      end
+      self.class.alloc(node, size, level)
+    end
+
+    # Split the subtree rooted at `node` (which is at `level`) into two
+    # nodes at the same level: one holding the first `index` items, the
+    # other holding the rest. Either side is nil if it would be empty.
+    # Only the nodes along the splitting boundary are copied; every other
+    # child subtree is shared with the original trie.
+    def split_node(node, level, index)
+      if level == 0
+        return [nil, node] if index == 0
+        return [node, nil] if index >= node.size
+        return [node.take(index).freeze, node.drop(index).freeze]
+      end
+
+      if node.is_a?(RelaxedNode)
+        children = node.children
+        slot = node.sizes.index { |size| index < size }
+        offset = slot > 0 ? node.sizes[slot - 1] : 0
+      else
+        children = node
+        slot = (index >> (level * BITS_PER_LEVEL)) & INDEX_MASK
+        offset = slot << (level * BITS_PER_LEVEL)
+      end
+
+      if index == offset
+        # the boundary falls exactly between two children
+        left_children = children.take(slot)
+        right_children = children.drop(slot)
+      else
+        left_child, right_child = split_node(children[slot], level - 1, index - offset)
+        left_children = children.take(slot)
+        left_children << left_child if left_child
+        right_children = children.drop(slot + 1)
+        right_children.unshift(right_child) if right_child
+      end
+
+      left = left_children.empty? ? nil : RelaxedNode.new(left_children, cumulative_sizes(left_children, level - 1))
+      right = right_children.empty? ? nil : RelaxedNode.new(right_children, cumulative_sizes(right_children, level - 1))
+      [left, right]
+    end
+
+    # Concatenate two subtrees of possibly different heights, returning
+    # [node, level] for the combined trie. Child subtrees of both inputs
+    # are reused; only the nodes along the adjoining spines are rebuilt,
+    # and overflowing nodes are split in half so the trie stays balanced.
+    def concat_nodes(a, a_level, b, b_level)
+      if a_level > b_level
+        a_children = node_children(a)
+        sub, sub_level = concat_nodes(a_children.last, a_level - 1, b, b_level)
+        if sub_level == a_level
+          children = a_children[0..-2].concat(node_children(sub))
+        else
+          children = a_children[0..-2] << lift_to_level(sub, sub_level, a_level - 1)
+        end
+        build_concat_node(children, a_level)
+      elsif b_level > a_level
+        b_children = node_children(b)
+        sub, sub_level = concat_nodes(a, a_level, b_children.first, b_level - 1)
+        if sub_level == b_level
+          children = node_children(sub) + b_children[1..-1]
+        else
+          children = [lift_to_level(sub, sub_level, b_level - 1)].concat(b_children[1..-1])
+        end
+        build_concat_node(children, b_level)
+      elsif a_level == 0
+        if a.size + b.size <= BLOCK_SIZE
+          [(a + b).freeze, 0]
+        else
+          [RelaxedNode.new([a, b], [a.size, a.size + b.size]), 1]
+        end
+      else
+        build_concat_node(node_children(a) + node_children(b), a_level)
+      end
+    end
+
+    # Group `children` (nodes at `level - 1`) into a node at `level`,
+    # splitting into two balanced halves (and going up one level) when
+    # they do not all fit. Returns [node, level].
+    def build_concat_node(children, level)
+      if children.size == 1
+        [children.first, level - 1]
+      elsif children.size <= BLOCK_SIZE
+        [RelaxedNode.new(children, cumulative_sizes(children, level - 1)), level]
+      else
+        half = children.size / 2
+        left = RelaxedNode.new(children[0...half], cumulative_sizes(children[0...half], level - 1))
+        right = RelaxedNode.new(children[half..-1], cumulative_sizes(children[half..-1], level - 1))
+        [RelaxedNode.new([left, right], [left.sizes.last, left.sizes.last + right.sizes.last]), level + 1]
+      end
+    end
+
+    # Wrap `node` in single-child interior nodes until it sits at
+    # `target_level`. Used to restore the expected height of a subtree
+    # after concatenation collapsed redundant levels.
+    def lift_to_level(node, level, target_level)
+      while level < target_level
+        node = RelaxedNode.new([node], [subtree_size(node, level)])
+        level += 1
+      end
+      node
+    end
+
+    # The number of leaf items stored in the subtree rooted at `node`,
+    # which sits at `level`.
+    def subtree_size(node, level)
+      if node.is_a?(RelaxedNode)
+        node.sizes.last
+      elsif level == 0
+        node.size
+      else
+        ((node.size - 1) << (BITS_PER_LEVEL * level)) + subtree_size(node.last, level - 1)
+      end
+    end
+
+    # Cumulative item counts for `children`, which are all at `child_level`.
+    def cumulative_sizes(children, child_level)
+      total = 0
+      children.map { |child| total += subtree_size(child, child_level) }
+    end
+
+    # Append `item` to the subtree rooted at `node` (at `level`),
+    # returning the new node, or nil if the subtree is already at full
+    # capacity and the caller needs to deepen the trie.
+    def relaxed_append(node, level, item)
+      if level == 0
+        return nil if node.size >= BLOCK_SIZE
+        return (node + [item]).freeze
+      end
+      if node.is_a?(RelaxedNode)
+        new_last = relaxed_append(node.children.last, level - 1, item)
+        if new_last
+          children = node.children.dup
+          children[-1] = new_last
+          sizes = node.sizes.dup
+          sizes[-1] += 1
+          RelaxedNode.new(children, sizes)
+        elsif node.children.size < BLOCK_SIZE
+          RelaxedNode.new(node.children + [new_spine(level - 1, item)],
+                          node.sizes + [node.sizes.last + 1])
+        end
+      else
+        new_last = relaxed_append(node.last, level - 1, item)
+        if new_last
+          (node[0..-2] + [new_last]).freeze
+        elsif node.size < BLOCK_SIZE
+          (node + [new_spine(level - 1, item)]).freeze
+        end
+      end
+    end
+
+    # A fresh right-hand spine of single-item nodes at `level`, used
+    # when appending past the end of a full subtree.
+    def new_spine(level, item)
+      node = [item].freeze
+      level.times { node = [node].freeze }
+      node
     end
   end
 
