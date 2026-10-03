@@ -1,6 +1,10 @@
 Changelog
 =========
 
+  - Unreleased
+    * [Added] Hamster::PrefixMap, an immutable compressed radix tree over
+      string keys, with longest-prefix lookup and lazy prefix enumeration
+
   - 3.0.0
     * [Changed] the behavior of Hamster::Hash#values_at
     * [Added] Hamster::Hash#dig and Hamster::Enumerable#grep_v
