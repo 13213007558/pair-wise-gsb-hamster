@@ -15,8 +15,8 @@ Hamster
 
 Efficient, immutable, and thread-safe collection classes for Ruby.
 
-Hamster provides 6 [Persistent Data
-Structures][PDS]: [`Hash`][HASH-DOC], [`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`SortedSet`][SORTED-SET-DOC], [`List`][LIST-DOC], and [`Deque`][DEQUE-DOC] (which works as an immutable queue or stack).
+Hamster provides 7 [Persistent Data
+Structures][PDS]: [`Hash`][HASH-DOC], [`OrderedHash`][ORDERED-HASH-DOC], [`Vector`][VECTOR-DOC], [`Set`][SET-DOC], [`SortedSet`][SORTED-SET-DOC], [`List`][LIST-DOC], and [`Deque`][DEQUE-DOC] (which works as an immutable queue or stack).
 
 Hamster collections are **immutable**. Whenever you modify a Hamster
 collection, the original is preserved and a modified copy is returned. This
@@ -41,6 +41,7 @@ process "infinitely large" lists.
 
 [PDS]: http://en.wikipedia.org/wiki/Persistent_data_structure
 [HASH-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Hash
+[ORDERED-HASH-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/OrderedHash
 [SET-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Set
 [VECTOR-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Vector
 [LIST-DOC]: http://rubydoc.info/github/hamstergem/hamster/master/Hamster/List
@@ -61,6 +62,7 @@ Or if you prefer to only pull in certain collection types:
 
 ``` ruby
 require "hamster/hash"
+require "hamster/ordered_hash"
 require "hamster/vector"
 require "hamster/set"
 require "hamster/sorted_set"
@@ -120,6 +122,34 @@ counters.put(:odds, &:next)         # => {:odds => 1, :evens => 0}
 ```
 
 This is just the beginning; see the [API documentation][HASH-DOC] for details on all `Hash` methods.
+
+
+<h2>OrderedHash <span style="font-size:0.7em">(<a href="http://rubydoc.info/github/hamstergem/hamster/master/Hamster/OrderedHash">API Documentation</a>)</span></h2>
+
+An `OrderedHash` is like a `Hash`, but it preserves the insertion order of
+its keys, just like Ruby's built-in `Hash`. Iteration, reverse iteration, and
+positional key lookup all follow that order:
+
+``` ruby
+hash = Hamster::OrderedHash[a: 1, b: 2, c: 3]
+hash.put(:b, 20)            # => Hamster::OrderedHash[a: 1, b: 20, c: 3]
+hash.delete(:a).put(:a, 9)  # => Hamster::OrderedHash[b: 2, c: 3, a: 9]
+hash.keys                   # => Hamster::Vector[:a, :b, :c]
+hash.key_at(0)              # => :a
+hash.key_at(-1)             # => :c
+```
+
+When merging, keys which are already present keep their original position;
+only genuinely new keys are appended at the end:
+
+``` ruby
+hash.merge(c: 30, d: 4)     # => Hamster::OrderedHash[a: 1, b: 2, c: 30, d: 4]
+```
+
+Like the other collections, `OrderedHash` is immutable and every update
+returns a new version which shares its structure with the previous one, so
+it is cheap to keep many versions around. See the [API
+documentation][ORDERED-HASH-DOC] for details on all `OrderedHash` methods.
 
 
 <h2>Vector <span style="font-size:0.7em">(<a href="http://rubydoc.info/github/hamstergem/hamster/master/Hamster/Vector">API Documentation</a>)</span></h2>

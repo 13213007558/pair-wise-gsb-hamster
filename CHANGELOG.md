@@ -1,6 +1,9 @@
 Changelog
 =========
 
+  - Unreleased
+    * [Added] Hamster::OrderedHash, an immutable hash which preserves insertion order
+
   - 3.0.0
     * [Changed] the behavior of Hamster::Hash#values_at
     * [Added] Hamster::Hash#dig and Hamster::Enumerable#grep_v
