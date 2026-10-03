@@ -16,6 +16,12 @@ describe :Hamster do
     end
   end
 
+  describe :PrefixMap do
+    it "can be loaded separately" do
+      expect(system(%{ruby -e "$:.unshift('#{hamster_lib_dir}'); require 'hamster/prefix_map'; Hamster::PrefixMap.new"})).to be(true)
+    end
+  end
+
   describe :Vector do
     it "can be loaded separately" do
       expect(system(%{ruby -e "$:.unshift('#{hamster_lib_dir}'); require 'hamster/vector'; Hamster::Vector.new"})).to be(true)
